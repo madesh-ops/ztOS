@@ -222,6 +222,30 @@
 	 * USI0 is two high-speed I2C channels (USI_MODE "hsi2c0_hsi2c1" in the
 	 * M20 kernel); the mode lives in SYSREG_PERI at 0x10032000 (usi.c).
 	 */
+	/*
+	 * The motion sensors' supplies, load switches Samsung's kernel turns on
+	 * at boot (exynos7904-m20lte_swa_open_gpio_02.dtsi: SENSOR_LDO_EN on
+	 * GPP8[1], SENSOR_LDO_1P8_EN on GPG3[1]); the sensor drivers switch
+	 * them now.
+	 */
+	sensor_vdd: regulator-sensor-vdd {
+		compatible = "regulator-fixed";
+		regulator-name = "sensor_vdd";
+		gpio = <&gpp8 1 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <10000>;
+	};
+
+	sensor_vddio: regulator-sensor-vddio {
+		compatible = "regulator-fixed";
+		regulator-name = "sensor_vddio";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&gpg3 1 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <10000>;
+	};
+
 	sysreg_usi: syscon@10032000 {
 		compatible = "syscon";
 		reg = <0x0 0x10032000 0x10>;
@@ -614,16 +638,37 @@
 };
 
 /* i2c_6: the motion sensors (exynos7904-m20lte-sensor-r03.dtsi). The
- * board has an LSM6DSL or a LIS2DS depending on the batch; st_lsm6dsx reads
- * the WHO_AM_I and leaves a missing chip alone. */
+ * board has an LSM6DSL or a LIS2DS(12) depending on the batch (this one has
+ * the LSM6DSL); each driver reads its WHO_AM_I and leaves a missing chip
+ * alone. The bus as Samsung runs it: 400 kHz, SDA delay 100. The sensors are
+ * unpowered until sensor_vdd and sensor_vddio are on, and hold the bus low
+ * meanwhile. The mount matrix is Samsung's st,orientation (each entry minus
+ * one): x = -y, y = x, z = z. */
 &i2c_6 {
 	status = "okay";
+	samsung,i2c-sda-delay = <100>;
+	samsung,i2c-max-bus-freq = <400000>;
+
+	accelerometer@1d {
+		compatible = "st,lis2ds12";
+		reg = <0x1d>;
+		interrupt-parent = <&gpa0>;
+		interrupts = <1 IRQ_TYPE_LEVEL_HIGH>;
+		vdd-supply = <&sensor_vdd>;
+		vddio-supply = <&sensor_vddio>;
+		mount-matrix = "1", "0", "0", "0", "1", "0", "0", "0", "1";
+	};
 
 	imu@6b {
 		compatible = "st,lsm6dsl";
 		reg = <0x6b>;
 		interrupt-parent = <&gpa0>;
 		interrupts = <3 IRQ_TYPE_LEVEL_HIGH>;
+		vdd-supply = <&sensor_vdd>;
+		vddio-supply = <&sensor_vddio>;
+		mount-matrix = "0", "-1", "0",
+			       "1", "0", "0",
+			       "0", "0", "1";
 	};
 };
 

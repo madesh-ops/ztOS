@@ -967,6 +967,10 @@ def apply_patch(name, marker_rel, marker):
 # peri_clk_regs, so registering it writes nothing.
 apply_patch("exynos_tmu-exynos7885.patch", "drivers/thermal/samsung/exynos_tmu.c",
             "SOC_ARCH_EXYNOS7885")
+# The LIS2DS12 (one of the M20's two possible accelerometers): no axis-enable
+# bits, or the probe selects +-16 g under a +-2 g scale (the T510 port's fix).
+apply_patch("st_accel-lis2ds12-axis.patch", "drivers/iio/accel/st_accel_core.c",
+            "No axis enable bits")
 insert(CLKH, "CLK_GOUT_TMU_PCLK",
        "#define CLK_GOUT_WDT1_PCLK\t\t43\n",
        "#define CLK_GOUT_TMU_PCLK\t\t44\n")

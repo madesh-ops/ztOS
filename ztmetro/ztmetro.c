@@ -302,7 +302,7 @@ struct zt_toplevel {
 	 * start-up work never shares the processor with an animation on screen */
 	bool awaiting;
 	uint32_t awaiting_since;
-	int sent_h;		/* the height it was last asked to take */
+	int sent_w, sent_h;	/* the size it was last asked to take */
 	struct wl_listener map, unmap, commit, destroy;
 };
 
@@ -578,7 +578,10 @@ struct zt_server {
 	char bt_name[64];
 	int bt_battery;			/* percent, -1 unknown */
 	bool shade_torch;
-	bool shade_rotation;
+	bool shade_rotation;	/* rotation locked: apps stay upright */
+	int rot;		/* how the app area is turned: 0 upright, 1 for the phone
+				 * held with its left side down, 3 with its right side down */
+	bool can_turn;		/* an accelerometer says which way up the phone is */
 	bool shade_airplane;
 	bool shade_location;
 	bool shade_notifs_cleared;
@@ -2422,6 +2425,8 @@ static void load_config(struct zt_server *server) {
         } else if (strcmp(key, "media_volume") == 0) {
             int n = atoi(value);
             server->volume = (n < 0 ? 0 : n > 100 ? 100 : n) * VOLUME_MAX / 100;
+        } else if (strcmp(key, "rotation_lock") == 0) {
+			server->shade_rotation = strcmp(value, "1") == 0 || strcmp(value, "on") == 0;
         } else if (strcmp(key, "haptics") == 0) {
 			server->haptics_enabled = strcmp(value, "off") != 0 && strcmp(value, "0") != 0;
 		} else if (strcmp(key, "haptic_strength") == 0) {
@@ -3646,6 +3651,70 @@ static bool wifi_up(void) {
 }
 
 /*
+ * The link's level, for where ztoscorenetworkingd does not run (the M20): a
+ * thread asks `iw` every so often while the screen is on, so the loop never
+ * waits on it. (Not /proc/net/wireless: cfg80211's wext compatibility, which
+ * provides it, froze the M20 once its Wi-Fi had connected.)
+ */
+static struct {
+	pthread_mutex_t lock;
+	pthread_cond_t wake;
+	bool started, wanted;
+	int bars;		/* -1 not known */
+} wifi_lvl = { .lock = PTHREAD_MUTEX_INITIALIZER, .wake = PTHREAD_COND_INITIALIZER, .bars = -1 };
+
+static void *wifi_level_thread(void *data) {
+	for (;;) {
+		pthread_mutex_lock(&wifi_lvl.lock);
+		while (!wifi_lvl.wanted) {
+			pthread_cond_wait(&wifi_lvl.wake, &wifi_lvl.lock);
+		}
+		pthread_mutex_unlock(&wifi_lvl.lock);
+		/* the steps are ztoscorenetworkingd's: -60, -72 and -82 dBm */
+		int bars = -1, dbm;
+		char line[256];
+		FILE *p = popen("for d in /sys/class/net/w*; do [ -d \"$d\" ] && iw dev ${d##*/} link 2>/dev/null; done", "r");
+		while (p && fgets(line, sizeof(line), p)) {
+			if (sscanf(line, " signal: %d", &dbm) == 1) {
+				bars = dbm >= -60 ? 3 : dbm >= -72 ? 2 : dbm >= -82 ? 1 : 0;
+			}
+		}
+		if (p) {
+			pclose(p);
+		}
+		pthread_mutex_lock(&wifi_lvl.lock);
+		wifi_lvl.bars = bars;
+		pthread_mutex_unlock(&wifi_lvl.lock);
+		sleep(15);
+	}
+	return NULL;
+}
+
+/* The bands the link's level earns, as last measured, or -1 when that is not
+ * known yet; asking starts the measuring. */
+static int wifi_level_bars(bool screen_on) {
+	pthread_mutex_lock(&wifi_lvl.lock);
+	if (!wifi_lvl.started && access("/usr/bin/iw", X_OK) == 0) {
+		sigset_t all, old;
+		sigfillset(&all);
+		pthread_sigmask(SIG_BLOCK, &all, &old);	/* as backlight_start_thread */
+		pthread_t thread;
+		if (pthread_create(&thread, NULL, wifi_level_thread, NULL) == 0) {
+			pthread_detach(thread);
+		}
+		pthread_sigmask(SIG_SETMASK, &old, NULL);
+		wifi_lvl.started = true;
+	}
+	if (screen_on != wifi_lvl.wanted) {
+		wifi_lvl.wanted = screen_on;
+		pthread_cond_signal(&wifi_lvl.wake);
+	}
+	int bars = wifi_lvl.bars;
+	pthread_mutex_unlock(&wifi_lvl.lock);
+	return bars;
+}
+
+/*
  * Status glyphs. Proportions are measured off a Windows Phone 8.1 status bar
  * and expressed against the battery cell's height, which is what the eye
  * compares them with: signal 1.15 high and 1.75 wide, Wi-Fi 1.15 square. All of
@@ -3808,9 +3877,13 @@ static int wifi_bars(struct zt_server *server) {
 	if (server->wifi_read_ms && now - server->wifi_read_ms < 40000 && server->wifi_bars >= 0) {
 		return server->wifi_bars;
 	}
-	/* Without it or if ztoscorenetworkingd had -1: check sysfs carrier/operstate */
+	/* Without it or if ztoscorenetworkingd had -1: check sysfs carrier/operstate,
+	 * and the link's level where the kernel keeps one (all bands lit if not) */
 	if (wifi_up()) {
-		if (server->wifi_bars < 0) {
+		int level = wifi_level_bars(server->screen_on);
+		if (level >= 0) {
+			server->wifi_bars = level;
+		} else if (server->wifi_bars < 0) {
 			server->wifi_bars = 3;
 		}
 		server->wifi_read_ms = now ? now : 1;
@@ -4486,12 +4559,13 @@ static void shade_tile_draw(struct zt_server *server, cairo_t *cr, int i, double
 	/* Bluetooth, rotation and location have nothing behind them on this
 	 * phone yet (no driver, no service), nor the flashlight while
 	 * zrn-flash is not loaded: shown, faint, and not pretending to switch */
-	bool missing = q == Q_ROTATION || q == Q_LOCATION ||
+	bool missing = (q == Q_ROTATION && !server->can_turn) || q == Q_LOCATION ||
 		(q == Q_FLASHLIGHT && access(TORCH_PATH, W_OK) != 0) ||
 		(q == Q_BLUETOOTH && access("/sys/class/bluetooth/hci0", F_OK) != 0);
 	bool on = q == Q_WIFI ? server->shade_wifi : q == Q_AIRPLANE ? server->shade_airplane :
 		q == Q_DATA ? server->cell_data_on : q == Q_VIBRATE ? server->haptics_enabled :
 		q == Q_FLASHLIGHT ? server->shade_torch : q == Q_BLUETOOTH ? server->shade_bt :
+		q == Q_ROTATION ? server->shade_rotation && server->can_turn :
 		q == Q_BRIGHTNESS;
 	/* on: the accent colour; off: a dark grey block */
 	if (on) {
@@ -5210,20 +5284,203 @@ static void osk_lift(struct zt_server *server) {
 
 /* Some apps will not go as narrow as the screen (a browser stops at 450
  * points or so). Such a window is shown smaller, so that all of it is there. */
+/* How wide the app area is, as the app sees it: turned, it is the stretch
+ * between the status row and the navigation bar. */
+static int app_width(struct zt_server *server) {
+	return server->rot ? server->height - STATUS_H - NAV_H : server->width;
+}
+
 static double app_fit(struct zt_server *server, struct zt_toplevel *toplevel) {
-	int w = toplevel->xdg_toplevel->base->geometry.width;
-	return w > server->width ? (double)server->width / w : 1.0;
+	int w = toplevel->xdg_toplevel->base->geometry.width, room = app_width(server);
+	return w > room ? (double)room / w : 1.0;
 }
 
 /* Ask an app for the room it has. Shown smaller, it has to be taller by as
- * much to reach the bottom. */
+ * much to reach the bottom. Turned, it has the screen's width (the keyboard
+ * stays along the bottom of the screen and does not lift it). */
 static void app_configure(struct zt_server *server, struct zt_toplevel *toplevel) {
-	double room = toplevel == server->shown ? app_height(server) :
-		server->height - STATUS_H - NAV_H;
+	double room = server->rot && toplevel == server->shown ? server->width :
+		toplevel == server->shown ? app_height(server) : server->height - STATUS_H - NAV_H;
+	int w = toplevel == server->shown ? app_width(server) : server->width;
 	int h = (int)(room / app_fit(server, toplevel));
-	if (h != toplevel->sent_h && toplevel->xdg_toplevel->base->initialized) {
+	if ((w != toplevel->sent_w || h != toplevel->sent_h) && toplevel->xdg_toplevel->base->initialized) {
+		toplevel->sent_w = w;
 		toplevel->sent_h = h;
-		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, server->width, h);
+		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
+	}
+}
+
+/*
+ * Which way up the phone is held, from the accelerometer (an IIO device, the
+ * M20's LSM6DSL), for turning apps on their side. Reading it wakes the chip
+ * and waits a sample or two, so a thread of its own does it, a few times a
+ * second and only while an app is up and the screen on; the loop hears of a
+ * change through an eventfd. Without an accelerometer nothing turns.
+ */
+static struct {
+	char dir[96];		/* the device's sysfs directory */
+	float matrix[9];	/* its mount matrix: the chip's axes to the phone's */
+	int fd;			/* eventfd: `held` changed */
+	pthread_mutex_t lock;
+	pthread_cond_t wake;
+	bool wanted;
+	int held;		/* 0 upright, 1 left side down, 3 right side down, -1 not known */
+} orient = { .fd = -1, .lock = PTHREAD_MUTEX_INITIALIZER, .wake = PTHREAD_COND_INITIALIZER, .held = -1 };
+
+static bool orient_axis(const char *axis, float *value) {
+	char path[160], text[32] = "";
+	snprintf(path, sizeof(path), "%s/in_accel_%s_raw", orient.dir, axis);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return false;
+	}
+	ssize_t n = read(fd, text, sizeof(text) - 1);
+	close(fd);
+	if (n <= 0) {
+		return false;
+	}
+	*value = (float)atof(text);
+	return true;
+}
+
+static void *orient_thread(void *data) {
+	int held = -1;
+	for (;;) {
+		pthread_mutex_lock(&orient.lock);
+		while (!orient.wanted) {
+			held = -1;	/* asked again, it is found afresh */
+			pthread_cond_wait(&orient.wake, &orient.lock);
+		}
+		pthread_mutex_unlock(&orient.lock);
+		float raw[3], v[3];
+		if (orient_axis("x", &raw[0]) && orient_axis("y", &raw[1]) && orient_axis("z", &raw[2])) {
+			for (int i = 0; i < 3; i++) {
+				v[i] = orient.matrix[i * 3] * raw[0] + orient.matrix[i * 3 + 1] * raw[1] +
+					orient.matrix[i * 3 + 2] * raw[2];
+			}
+			/* the phone's axes: x to its right edge, y to its top, z out of
+			 * the screen; held still, the reading points away from the ground */
+			float g = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+			float upright = sqrtf(v[0] * v[0] + v[1] * v[1]);
+			int now = held;
+			/* lying nearly flat, or upside down: as it was */
+			if (g > 0 && upright > 0.5f * g) {
+				float deg = atan2f(v[0], v[1]) * 180.0f / (float)M_PI;
+				now = fabsf(deg) < 30 ? 0 : deg > 60 && deg < 120 ? 1 :
+					deg < -60 && deg > -120 ? 3 : held;
+			}
+			if (now != held) {
+				held = now;
+				pthread_mutex_lock(&orient.lock);
+				orient.held = held;
+				pthread_mutex_unlock(&orient.lock);
+				uint64_t one = 1;
+				if (write(orient.fd, &one, sizeof(one)) < 0) {}
+			}
+		}
+		usleep(250000);
+	}
+	return NULL;
+}
+
+/* Turn the app area as the phone is held: only an app turns (Start, the
+ * lock screen and the action centre stay upright), and not while rotation is
+ * locked. Run when anything that decides it changes; cheap when nothing has. */
+static void orient_apply(struct zt_server *server) {
+	if (orient.fd < 0) {
+		return;
+	}
+	bool wanted = server->shown && server->screen_on && !server->locked && !server->shade_rotation;
+	pthread_mutex_lock(&orient.lock);
+	if (wanted != orient.wanted) {
+		orient.wanted = wanted;
+		if (!wanted) {
+			orient.held = -1;
+		}
+		pthread_cond_signal(&orient.wake);
+	}
+	int held = orient.held;
+	pthread_mutex_unlock(&orient.lock);
+	int rot = wanted && held > 0 ? held : !wanted || held == 0 ? 0 : server->rot;
+	if (rot != server->rot) {
+		wlr_log(WLR_INFO, "orientation: apps %s", rot == 1 ? "turned left" : rot == 3 ? "turned right" : "upright");
+		server->rot = rot;
+		if (server->shown) {
+			app_configure(server, server->shown);
+		}
+		damage(server);
+	}
+}
+
+static int orient_changed(int fd, uint32_t mask, void *data) {
+	uint64_t n;
+	if (read(fd, &n, sizeof(n)) < 0) {}
+	orient_apply(data);
+	return 0;
+}
+
+static void orient_init(struct zt_server *server) {
+	glob_t g;
+	if (glob("/sys/bus/iio/devices/iio:device*/in_accel_x_raw", 0, NULL, &g) != 0 || g.gl_pathc == 0) {
+		globfree(&g);
+		return;
+	}
+	snprintf(orient.dir, sizeof(orient.dir), "%.*s",
+		(int)(strrchr(g.gl_pathv[0], '/') - g.gl_pathv[0]), g.gl_pathv[0]);
+	globfree(&g);
+	float *m = orient.matrix;
+	m[0] = m[4] = m[8] = 1;
+	char path[160], text[160] = "";
+	FILE *f = NULL;
+	/* named for how widely the driver shares it */
+	static const char *const names[] = { "mount_matrix", "in_mount_matrix", "in_accel_mount_matrix" };
+	for (int i = 0; i < 3 && !f; i++) {
+		snprintf(path, sizeof(path), "%s/%s", orient.dir, names[i]);
+		f = fopen(path, "r");
+	}
+	if (f) {
+		/* "0, -1, 0; 1, 0, 0; 0, 0, 1" */
+		if (fgets(text, sizeof(text), f) &&
+		    sscanf(text, "%f, %f, %f; %f, %f, %f; %f, %f, %f", &m[0], &m[1], &m[2],
+			   &m[3], &m[4], &m[5], &m[6], &m[7], &m[8]) != 9) {
+			memset(m, 0, 9 * sizeof(float));
+			m[0] = m[4] = m[8] = 1;
+		}
+		fclose(f);
+	}
+	orient.fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (orient.fd < 0) {
+		return;
+	}
+	sigset_t all, old;
+	sigfillset(&all);
+	pthread_sigmask(SIG_BLOCK, &all, &old);	/* as backlight_start_thread */
+	pthread_t thread;
+	if (pthread_create(&thread, NULL, orient_thread, NULL) == 0) {
+		pthread_detach(thread);
+		wl_event_loop_add_fd(server->loop, orient.fd, WL_EVENT_READABLE, orient_changed, server);
+		server->can_turn = true;
+		wlr_log(WLR_INFO, "orientation: %s (%s)", orient.dir, text[0] ? text : "no mount matrix");
+	} else {
+		close(orient.fd);
+		orient.fd = -1;
+	}
+	pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
+/* A point on the screen as the app area's own: (u, v) from its top left
+ * corner as the app sees it, before the app is fitted to it. */
+static void app_point(struct zt_server *server, double x, double y, double *u, double *v) {
+	double top = STATUS_H - server->app_lift, room = server->height - STATUS_H - NAV_H;
+	if (server->rot == 1) {
+		*u = y - top;
+		*v = server->width - x;
+	} else if (server->rot == 3) {
+		*u = room - (y - top);
+		*v = x;
+	} else {
+		*u = x;
+		*v = y - top;
 	}
 }
 
@@ -5885,6 +6142,16 @@ static void shade_activate(struct zt_server *server, int index) {
 		damage(server);
 		break;
 	case 100 + Q_ROTATION:
+		if (!server->can_turn) {
+			break;
+		}
+		hap(server, HAP_CLICK, HG_SYSTEM);
+		server->shade_rotation = !server->shade_rotation;
+		config_keep("rotation_lock", server->shade_rotation);
+		orient_apply(server);
+		draw_shade(server);
+		damage(server);
+		break;
 	case 100 + Q_LOCATION:
 	case 100 + Q_NONE:
 		break;	/* nothing behind them yet: see shade_tile_draw */
@@ -6612,6 +6879,7 @@ static void xdg_toplevel_commit(struct wl_listener *listener, void *data) {
 	if (toplevel->xdg_toplevel->base->initial_commit) {
 		/* Every app gets the whole app area, and is told it is maximised so
 		 * it draws no shadows or resize borders. */
+		toplevel->sent_w = server->width;
 		toplevel->sent_h = server->height - STATUS_H - NAV_H;
 		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, server->width, toplevel->sent_h);
 		wlr_xdg_toplevel_set_maximized(toplevel->xdg_toplevel, true);
@@ -6827,10 +7095,11 @@ static struct wlr_surface *surface_at(struct zt_server *server, double x, double
 	if (server->shown->awaiting) {
 		return NULL;	/* still behind "Loading...": nothing of it to touch */
 	}
-	double ox, oy, fit = app_fit(server, server->shown);
+	double ox, oy, u, v, fit = app_fit(server, server->shown);
 	app_origin(server->shown, &ox, &oy);
+	app_point(server, x, y, &u, &v);
 	return wlr_xdg_surface_surface_at(server->shown->xdg_toplevel->base,
-		x / fit - ox, (y + server->app_lift - STATUS_H) / fit + STATUS_H - oy, sx, sy);
+		u / fit - ox, v / fit + STATUS_H - oy, sx, sy);
 }
 
 static int tile_at(struct zt_server *server, double x, double y) {
@@ -7866,6 +8135,8 @@ static void screen_set(struct zt_server *server, bool on) {
 	}
 	wlr_output_state_finish(&state);
 	server->screen_on = on;
+	orient_apply(server);	/* dark, the accelerometer rests */
+	wifi_level_bars(on);	/* and so does the measuring of the link */
 	if (on)
 		backlight_set(server->shade_brightness);	/* the panel comes back at its
 							 * boot level otherwise: a flash */
@@ -8390,12 +8661,17 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		damage(server);
 		break;
 	}
-	case ROLE_CLIENT:
-		/* Coordinates stay relative to the surface the finger went down on. */
+	case ROLE_CLIENT: {
+		/* Coordinates stay relative to the surface the finger went down on,
+		 * and run the app's way when it is turned. */
+		double u, v, u0, v0;
+		app_point(server, x, y, &u, &v);
+		app_point(server, p->x0, p->y0, &u0, &v0);
 		wlr_seat_touch_notify_motion(server->seat, time, id,
-			p->ox + (x - p->x0) / p->fit, p->oy + (y - p->y0) / p->fit);
+			p->ox + (u - u0) / p->fit, p->oy + (v - v0) / p->fit);
 		wlr_seat_touch_notify_frame(server->seat);
 		break;
+	}
 	case ROLE_HYPER:
 		if (p->moved && server->hyper) {
 			double bottom = server->osk_visible ? server->height - NAV_H - server->osk_h : server->height - NAV_H;
@@ -9206,6 +9482,7 @@ struct app_draw {
 	double ox, oy, fit;
 	float x, y, scale;	/* where the app area's corner goes, and how large */
 	float angle, alpha;
+	int rot;		/* turned as zt_server.rot */
 	struct timespec when;
 };
 
@@ -9222,6 +9499,20 @@ static void draw_app_surface(struct wlr_surface *surface, int sx, int sy, void *
 	mat_identity(m);
 	mat_rotate_y(m, draw->angle);	/* round the screen's left edge */
 	mat_translate(m, draw->x, draw->y);
+	if (draw->rot) {
+		/* on its side, the inverse of app_point: the app's top left corner
+		 * goes to the top right of the app area (left side down) or the
+		 * bottom left (right side down) */
+		float t[16];
+		mat_identity(t);
+		bool left = draw->rot == 1;
+		t[0] = t[5] = 0;
+		t[1] = left ? 1 : -1;
+		t[4] = left ? -1 : 1;
+		t[12] = left ? (float)server->width : 0;
+		t[13] = left ? 0 : (float)(server->height - STATUS_H - NAV_H);
+		mat_mul(m, m, t);
+	}
 	mat_scale(m, (float)draw->fit * draw->scale, (float)draw->fit * draw->scale);	/* about the app area's corner */
 	mat_translate(m, (float)(draw->ox + sx), (float)(draw->oy - STATUS_H + sy));
 	mat_scale(m, surface->current.width, surface->current.height);
@@ -9466,6 +9757,7 @@ static void render_frame(struct zt_server *server) {
 		wlr_output_state_finish(&state);
 		return;
 	}
+	orient_apply(server);	/* an app came up or went, the screen locked... */
 	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
 	glViewport(0, 0, output->width, output->height);
 	glDisable(GL_SCISSOR_TEST);
@@ -9685,6 +9977,7 @@ static void render_frame(struct zt_server *server) {
 		}
 	} else if (app && app->mapped) {
 		app_origin(app, &draw.ox, &draw.oy);
+		draw.rot = app == server->shown ? server->rot : 0;
 		draw.fit = app_fit(server, app);
 		wlr_xdg_surface_for_each_surface(app->xdg_toplevel->base, draw_app_surface, &draw);
 	}
@@ -10284,6 +10577,7 @@ int main(int argc, char *argv[]) {
 	server.nav_pressed = -1;
 	server.osk_pressed = -1;
 	server.ctl_fd = -1;
+	server.wifi_bars = -1;	/* no link until one is seen */
     server.auth_fd = -1;
 	server.tapped = -1;
 	server.tapped_item = -1;
@@ -10335,6 +10629,7 @@ int main(int argc, char *argv[]) {
 	server.loop = wl_display_get_event_loop(server.wl_display);
 	backlight_init(&server);
 	backlight_set(server.shade_brightness);	/* (load_config ran before the loop) */
+	orient_init(&server);
 	server.backend = wlr_backend_autocreate(server.loop, NULL);
 	if (!server.backend) {
 		wlr_log(WLR_ERROR, "failed to create the backend");

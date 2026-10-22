@@ -1,0 +1,38 @@
+From: Mollomm1 <68751598+Mollomm1@users.noreply.github.com>
+Subject: iio: accel: st_accel: LIS2DS12 has no axis enable bits
+
+The LIS2DS12 settings use the default axis enable field, bits 2:0 of
+register 0x20. In this part they are FS[0], HF_ODR and BDU instead: when
+probe enables all axes after setting the full scale, it selects +-16g
+while the driver keeps reporting the +-2g scale, so every reading is
+eight times too small. Buffer captures with a partial scan mask would
+also change the full scale and BDU.
+
+Drop the axis enable field, as the part always samples all three axes.
+
+Seen on the Galaxy Tab A 10.1 (2019): 1g read as 1.25 m/s^2 until the
+scale was written again from userspace.
+
+Fixes: f168a6db111b ("iio: accel: st_accel: add support for LIS2DS12")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+
+diff --git a/drivers/iio/accel/st_accel_core.c b/drivers/iio/accel/st_accel_core.c
+index 99cb661fab..d4d732c71a 100644
+--- a/drivers/iio/accel/st_accel_core.c
++++ b/drivers/iio/accel/st_accel_core.c
+@@ -949,10 +949,10 @@ static const struct st_sensor_settings st_accel_sensors_settings[] = {
+ 			.mask = 0xf0,
+ 			.value_off = ST_SENSORS_DEFAULT_POWER_OFF_VALUE,
+ 		},
+-		.enable_axis = {
+-			.addr = ST_SENSORS_DEFAULT_AXIS_ADDR,
+-			.mask = ST_SENSORS_DEFAULT_AXIS_MASK,
+-		},
++		/*
++		 * No axis enable bits: CTRL1 bits 2:0 are FS[0], HF_ODR and
++		 * BDU, so the default axis mask would select +-16g.
++		 */
+ 		.fs = {
+ 			.addr = 0x20,
+ 			.mask = 0x0c,
