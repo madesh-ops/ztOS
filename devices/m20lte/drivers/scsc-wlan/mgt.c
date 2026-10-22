@@ -47,6 +47,11 @@
 
 #define SLSI_PSID_UNIFI_IGMP_OFFLOAD_ACTIVATED 2489
 
+/* 5 GHz only where the board has a 5 GHz path: not on the Galaxy M20 */
+static bool slsi_band_5g;
+module_param_named(band_5g, slsi_band_5g, bool, S_IRUGO);
+MODULE_PARM_DESC(band_5g, "offer 5 GHz (the Galaxy M20 has no 5 GHz path: off)");
+
 static char *mib_file_t = "wlan_t.hcf";
 module_param(mib_file_t, charp, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(mib_file_t, "mib data filename");
@@ -1480,6 +1485,14 @@ static int slsi_mib_initial_get(struct slsi_dev *sdev)
 						break;
 					}
 				}
+				/*
+				 * The Galaxy M20 is 2.4 GHz only (Samsung's spec, its Wi-Fi
+				 * certification): the S612 and its A40-based configuration
+				 * offer 5 GHz, but the board has no 5 GHz path, so it
+				 * hears 5 GHz networks at around -88 dBm and moves ~3 Mbit/s.
+				 */
+				if (!slsi_band_5g)
+					sdev->band_5g_supported = 0;
 				for (i = 0; i < values[mib_index].u.octetValue.dataLength; i += 2) {
 					chan_start = values[mib_index].u.octetValue.data[i];
 					chan_count = values[mib_index].u.octetValue.data[i + 1];
