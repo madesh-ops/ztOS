@@ -2327,6 +2327,20 @@ static void backlight_set(int percent) {
 	damage(bl.server);
 }
 
+/* The screen is going off. The S9's panel driver takes its backlight down
+ * with the output; a framebuffer-only screen (the M20's simpledrm) only goes
+ * black, with the backlight still lit, so switch it off here. backlight_set()
+ * brings it back at the level wanted, which this leaves alone. */
+static void backlight_off(void) {
+	if (!backlight_usable() || bl.mode != BL_CTL) {
+		return;
+	}
+	pthread_mutex_lock(&bl.lock);
+	bl.want = 0;
+	pthread_cond_signal(&bl.wake);
+	pthread_mutex_unlock(&bl.lock);
+}
+
 /* How much of the picture to take away for the brightness wanted: all of it
  * without a backlight; on the S9 what the panel's level is above the target
  * (pixel values darkened by m give m^2.2 of the light); nothing with
@@ -4825,12 +4839,27 @@ static void boot_anim_start(struct zt_server *server) {
 	damage(server);
 }
 
+/* Whether this phone has a Samsung sensor hub to wait for: its
+ * ztOSCoreSensorFramework components list the hub's unit (the S9's do; the
+ * Galaxy M20 has no hub, its sensors are plain I2C devices). */
+static bool phone_has_sensorhub(void) {
+	FILE *f = fopen("/etc/ztoscoresensorframework/components", "r");
+	char line[256];
+	bool found = false;
+	if (!f)
+		return false;
+	while (!found && fgets(line, sizeof(line), f))
+		found = line[0] != '#' && strstr(line, "ztoscsf-sensorhub.service") != NULL;
+	fclose(f);
+	return found;
+}
+
 static int boot_check_sensorhub(void *data) {
 	struct zt_server *server = data;
 	bool test_fail = getenv("ZT_TEST_SENSORHUB_FAIL") != NULL;
 
-	bool ready = false;
-	if (!test_fail) {
+	bool ready = !test_fail && !phone_has_sensorhub();
+	if (!test_fail && !ready) {
 		char buf[16] = {0};
 		int fd = open("/sys/class/sec/sensorhub/ready", O_RDONLY);
 		if (fd >= 0) {
@@ -7842,6 +7871,7 @@ static void screen_set(struct zt_server *server, bool on) {
 							 * boot level otherwise: a flash */
 	wlr_log(WLR_INFO, "screen %s", on ? "on" : "off");
 	if (!on) {
+		backlight_off();
 		/* locked as it goes dark (lock() itself runs as it comes back on,
 		 * and waking is silent) */
 		ui_sound(server, UIS_LOCK);

@@ -465,9 +465,29 @@ static void battery_look(void)
 	}
 }
 
+/* Whether this phone has a sensor hub at all: the components list names its
+ * unit (the S9's does; the Galaxy M20 has none). */
+static bool phone_has_sensorhub(void)
+{
+	FILE *f = fopen("/etc/ztoscoresensorframework/components", "r");
+	char line[256];
+	bool found = false;
+	if (!f)
+		return false;
+	while (!found && fgets(line, sizeof(line), f))
+		found = line[0] != '#' && strstr(line, "ztoscsf-sensorhub.service") != NULL;
+	fclose(f);
+	return found;
+}
+
 static void sensorhub_look(void)
 {
 	static bool dialog_shown = false;
+	static int has_hub = -1;
+	if (has_hub < 0)
+		has_hub = phone_has_sensorhub();
+	if (!has_hub)
+		return;
 	if (access("/run/ztoscsf-sensorhub.stopped", F_OK) == 0 ||
 	    access("/run/sensorhub.stopped", F_OK) == 0) {
 		return;

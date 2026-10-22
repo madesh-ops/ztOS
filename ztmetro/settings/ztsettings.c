@@ -6,7 +6,7 @@
  * Designed in the authentic Windows Phone 8.1 Metro aesthetic.
  * All settings pages feature 60 FPS turnstile/slide page transitions,
  * animated toggle switches, interactive sliders, and live hardware telemetry
- * for the Samsung Galaxy S9 (SM-G960N starlte, Exynos 9810, Mali-G72).
+ * for the phone it runs on (PHONES: the Galaxy S9, the default, and the M20).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -284,6 +284,72 @@ static void read_sys_file(const char *path, char *out, size_t size) {
 	}
 }
 
+/*
+ * The phone's own hardware, for the pages that describe it. The image build
+ * writes the target to /etc/ztos/target; the S9 is the default. A NULL path
+ * means the phone has no such driver yet, and its page says so.
+ */
+struct phone_spec {
+	const char *target;
+	const char *model, *name;		/* About, and the hub's About line */
+	const char *soc, *soc_short;
+	const char *little, *little_range, *little_policy;
+	const char *big, *big_range, *big_policy;
+	const char *ram, *ram_kind, *storage;
+	const char *gpu, *gpu_short, *gpu_range, *gpu_devfreq;
+	const char *display, *compositor;
+	const char *battery;			/* power_supply directory */
+};
+
+static const struct phone_spec PHONES[] = {
+	{
+		.target = "starlte",
+		.model = "Samsung Galaxy S9 (SM-G960N starlte)", .name = "Samsung Galaxy S9",
+		.soc = "Samsung Exynos 9810 (10nm LPP)", .soc_short = "Exynos 9810 (8 cores)",
+		.little = "LITTLE Cluster (Cores 0-3, Cortex-A55)", .little_range = "350 - 1794 MHz",
+		.little_policy = "/sys/devices/system/cpu/cpufreq/policy0",
+		.big = "BIG Cluster (Cores 4-7, M3 Cheetah)", .big_range = "400 - 2704 MHz",
+		.big_policy = "/sys/devices/system/cpu/cpufreq/policy4",
+		.ram = "3.5 GB RAM", .ram_kind = "Physical Memory (LPDDR4X)", .storage = "UFS 2.1 Storage",
+		.gpu = "ARM Mali-G72 MP18 (Bifrost)", .gpu_short = "Mali-G72 MP18",
+		.gpu_range = "260, 455, 572 MHz", .gpu_devfreq = "/sys/class/devfreq/17500000.gpu",
+		.display = "Super AMOLED 1440x2960 @ 60.00 Hz",
+		.compositor = "Wayland / wlroots 0.20 + OpenGL ES 2.0",
+		.battery = "/sys/class/power_supply/max170xx_battery",
+	}, {
+		.target = "m20lte",
+		.model = "Samsung Galaxy M20 (SM-M205F m20lte)", .name = "Samsung Galaxy M20",
+		.soc = "Samsung Exynos 7904 (14nm FinFET)", .soc_short = "Exynos 7904 (8 cores)",
+		.little = "LITTLE Cluster (Cores 0-5, Cortex-A53)", .little_range = "up to 1586 MHz",
+		.big = "BIG Cluster (Cores 6-7, Cortex-A73)", .big_range = "up to 1794 MHz",
+		.ram = "3 GB RAM", .ram_kind = "Physical Memory", .storage = "eMMC Storage",
+		.gpu = "ARM Mali-G71 MP2 (Bifrost, Panfrost)", .gpu_short = "Mali-G71 MP2",
+		.gpu_range = "343 - 845 MHz",
+		.display = "PLS TFT LCD 1080x2340 @ 60.00 Hz",
+		.compositor = "Wayland / wlroots 0.20 + OpenGL ES 3.1 (Panfrost)",
+		.battery = "/sys/class/power_supply/battery",
+	},
+};
+static const struct phone_spec *phone = &PHONES[0];
+
+static void phone_detect(void) {
+	char target[32];
+	read_sys_file("/etc/ztos/target", target, sizeof(target));
+	for (size_t i = 0; i < sizeof(PHONES) / sizeof(PHONES[0]); i++)
+		if (strcmp(target, PHONES[i].target) == 0)
+			phone = &PHONES[i];
+}
+
+/* A file under one of the spec's sysfs directories, or "" if there is none. */
+static void read_phone_file(const char *dir, const char *name, char *out, size_t size) {
+	char path[160];
+	out[0] = 0;
+	if (!dir)
+		return;
+	snprintf(path, sizeof(path), "%s/%s", dir, name);
+	read_sys_file(path, out, size);
+}
+
 /* The whole UI's animation speed, percent of what was measured on the Lumia */
 static const int menu_speeds[] = { 50, 75, 100, 125, 150, 200 };
 #define N_MENU_SPEEDS 6
@@ -387,11 +453,12 @@ static void config_load(void) {
 	zmc.accent = ACCENTS[app.accent].color;
 
 	char buf[64];
-	read_sys_file("/sys/devices/system/cpu/cpufreq/policy0/scaling_governor", buf, sizeof(buf));
+	phone_detect();
+	read_phone_file(phone->little_policy, "scaling_governor", buf, sizeof(buf));
 	if (buf[0]) snprintf(app.cpu_gov, sizeof(app.cpu_gov), "%s", buf);
 	else snprintf(app.cpu_gov, sizeof(app.cpu_gov), "schedutil");
 
-	read_sys_file("/sys/class/devfreq/17500000.gpu/governor", buf, sizeof(buf));
+	read_phone_file(phone->gpu_devfreq, "governor", buf, sizeof(buf));
 	if (buf[0]) snprintf(app.gpu_gov, sizeof(app.gpu_gov), "%s", buf);
 	else snprintf(app.gpu_gov, sizeof(app.gpu_gov), "simple_ondemand");
 
@@ -847,23 +914,31 @@ static double draw_main(cairo_t *cr) {
 	y = zmc_entry(cr, y, "notifications + actions", detail, ACT_OPEN_PAGE, PAGE_QUICK);
 
 	char bat_buf[32];
-	read_sys_file("/sys/class/power_supply/max170xx_battery/capacity", bat_buf, sizeof(bat_buf));
+	read_phone_file(phone->battery, "capacity", bat_buf, sizeof(bat_buf));
 	int bat = bat_buf[0] ? atoi(bat_buf) : 51;
 	snprintf(detail, sizeof(detail), "%d%%, %s", bat, app.battery_saver ? "battery saver on" : "discharging");
 	y = zmc_entry(cr, y, "battery saver", detail, ACT_OPEN_PAGE, PAGE_BATTERY);
 
-	snprintf(detail, sizeof(detail), "Exynos 9810 (8 cores), %s", app.cpu_gov);
+	if (phone->little_policy)
+		snprintf(detail, sizeof(detail), "%s, %s", phone->soc_short, app.cpu_gov);
+	else
+		snprintf(detail, sizeof(detail), "%s", phone->soc_short);
 	y = zmc_entry(cr, y, "processor", detail, ACT_OPEN_PAGE, PAGE_CPU);
 
-	snprintf(detail, sizeof(detail), "3.5 GB RAM, swappiness %d", app.swappiness);
+	snprintf(detail, sizeof(detail), "%s, swappiness %d", phone->ram, app.swappiness);
 	y = zmc_entry(cr, y, "virtual memory", detail, ACT_OPEN_PAGE, PAGE_VM);
 
-	snprintf(detail, sizeof(detail), "Mali-G72 MP18 (%s), 60 FPS", app.gpu_gov);
+	if (phone->gpu_devfreq)
+		snprintf(detail, sizeof(detail), "%s (%s), 60 FPS", phone->gpu_short, app.gpu_gov);
+	else
+		snprintf(detail, sizeof(detail), "%s, %s rendering", phone->gpu_short,
+			access("/dev/dri/renderD128", F_OK) == 0 ? "hardware" : "software");
 	y = zmc_entry(cr, y, "graphics", detail, ACT_OPEN_PAGE, PAGE_GPU);
 
 	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
 
-	y = zmc_entry(cr, y, "about", "Samsung Galaxy S9, ztOS Mobile", ACT_OPEN_PAGE, PAGE_ABOUT);
+	snprintf(detail, sizeof(detail), "%s, ztOS Mobile", phone->name);
+	y = zmc_entry(cr, y, "about", detail, ACT_OPEN_PAGE, PAGE_ABOUT);
 
 	return y + 20;
 }
@@ -1901,9 +1976,9 @@ static double draw_battery(cairo_t *cr) {
 	double y = zmc_header(cr, "battery saver");
 
 	char cap[32], stat[32], volt[32];
-	read_sys_file("/sys/class/power_supply/max170xx_battery/capacity", cap, sizeof(cap));
-	read_sys_file("/sys/class/power_supply/max170xx_battery/status", stat, sizeof(stat));
-	read_sys_file("/sys/class/power_supply/max170xx_battery/voltage_now", volt, sizeof(volt));
+	read_phone_file(phone->battery, "capacity", cap, sizeof(cap));
+	read_phone_file(phone->battery, "status", stat, sizeof(stat));
+	read_phone_file(phone->battery, "voltage_now", volt, sizeof(volt));
 	int pct = cap[0] ? atoi(cap) : 51;
 	double v = volt[0] ? atoi(volt) / 1000000.0 : 3.80;
 
@@ -1938,41 +2013,42 @@ static double draw_battery(cairo_t *cr) {
 static double draw_cpu(cairo_t *cr) {
 	double y = zmc_header(cr, "processor");
 
-	char p0_f[32], p4_f[32], load[64];
-	read_sys_file("/sys/devices/system/cpu/cpufreq/policy0/scaling_cur_freq", p0_f, sizeof(p0_f));
-	read_sys_file("/sys/devices/system/cpu/cpufreq/policy4/scaling_cur_freq", p4_f, sizeof(p4_f));
+	char load[64];
 	read_sys_file("/proc/loadavg", load, sizeof(load));
-	double f0 = p0_f[0] ? atoi(p0_f) / 1000.0 : 1794.0;
-	double f4 = p4_f[0] ? atoi(p4_f) / 1000.0 : 2704.0;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "SoC Architecture", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Samsung Exynos 9810 (10nm LPP)", FONT_SEMILIGHT, 20, MARGIN, y + 18, 0);
+	zmc_text(cr, phone->soc, FONT_SEMILIGHT, 20, MARGIN, y + 18, 0);
 	y += 56;
 
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "LITTLE Cluster (Cores 0-3, Cortex-A55)", FONT_REGULAR, 13, MARGIN, y, 0);
-	char c0_str[64];
-	snprintf(c0_str, sizeof(c0_str), "%.0f MHz (350 - 1794 MHz)", f0);
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, c0_str, FONT_REGULAR, 16, MARGIN, y + 20, 0);
-	y += 52;
+	const char *names[2] = { phone->little, phone->big };
+	const char *ranges[2] = { phone->little_range, phone->big_range };
+	const char *policies[2] = { phone->little_policy, phone->big_policy };
+	for (int c = 0; c < 2; c++) {
+		char cur[32], str[96];
+		read_phone_file(policies[c], "scaling_cur_freq", cur, sizeof(cur));
+		if (cur[0])
+			snprintf(str, sizeof(str), "%d MHz (%s)", atoi(cur) / 1000, ranges[c]);
+		else if (policies[c])
+			snprintf(str, sizeof(str), "%s", ranges[c]);
+		else
+			snprintf(str, sizeof(str), "%s, no frequency scaling yet", ranges[c]);
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, names[c], FONT_REGULAR, 13, MARGIN, y, 0);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		zmc_text(cr, str, FONT_REGULAR, 16, MARGIN, y + 20, 0);
+		y += 52;
+	}
 
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "BIG Cluster (Cores 4-7, M3 Cheetah)", FONT_REGULAR, 13, MARGIN, y, 0);
-	char c4_str[64];
-	snprintf(c4_str, sizeof(c4_str), "%.0f MHz (400 - 2704 MHz)", f4);
-	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, c4_str, FONT_REGULAR, 16, MARGIN, y + 20, 0);
-	y += 52;
-
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "CPU Governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
-	zmc_set_rgb(cr, ACCENTS[app.accent].color);
-	zmc_text(cr, app.cpu_gov, FONT_SEMILIGHT, 22, MARGIN, y + 20, 0);
-	zmc_add_hit(0, y - 4, zmc.width, 54, ACT_CPU_GOVERNOR, 0);
-	y += 62;
+	if (phone->little_policy) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, "CPU Governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
+		zmc_set_rgb(cr, ACCENTS[app.accent].color);
+		zmc_text(cr, app.cpu_gov, FONT_SEMILIGHT, 22, MARGIN, y + 20, 0);
+		zmc_add_hit(0, y - 4, zmc.width, 54, ACT_CPU_GOVERNOR, 0);
+		y += 62;
+	}
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "System Load Average", FONT_REGULAR, 13, MARGIN, y, 0);
@@ -1992,7 +2068,7 @@ static double draw_vm(cairo_t *cr) {
 	double used_ram = total_ram - free_ram;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Physical Memory (LPDDR4X)", FONT_REGULAR, 13, MARGIN, y, 0);
+	zmc_text(cr, phone->ram_kind, FONT_REGULAR, 13, MARGIN, y, 0);
 	char ram_str[64];
 	snprintf(ram_str, sizeof(ram_str), "%.2f GB used of %.2f GB", used_ram, total_ram);
 	cairo_set_source_rgb(cr, 1, 1, 1);
@@ -2010,7 +2086,7 @@ static double draw_vm(cairo_t *cr) {
 		double total_disk = (double)fs.f_blocks * fs.f_frsize / 1e9;
 		double free_disk = (double)fs.f_bavail * fs.f_frsize / 1e9;
 		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-		zmc_text(cr, "UFS 2.1 Storage", FONT_REGULAR, 13, MARGIN, y, 0);
+		zmc_text(cr, phone->storage, FONT_REGULAR, 13, MARGIN, y, 0);
 		char disk_str[64];
 		snprintf(disk_str, sizeof(disk_str), "%.1f GB free of %.1f GB", free_disk, total_disk);
 		cairo_set_source_rgb(cr, 1, 1, 1);
@@ -2025,40 +2101,46 @@ static double draw_gpu(cairo_t *cr) {
 	double y = zmc_header(cr, "graphics");
 
 	char cur_f[32];
-	read_sys_file("/sys/class/devfreq/17500000.gpu/cur_freq", cur_f, sizeof(cur_f));
-	double mhz = cur_f[0] ? atoi(cur_f) / 1000000.0 : 260.0;
+	read_phone_file(phone->gpu_devfreq, "cur_freq", cur_f, sizeof(cur_f));
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "GPU Engine", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "ARM Mali-G72 MP18 (Bifrost)", FONT_SEMILIGHT, 21, MARGIN, y + 18, 0);
+	zmc_text(cr, phone->gpu, FONT_SEMILIGHT, 21, MARGIN, y + 18, 0);
 	y += 56;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Clock frequency", FONT_REGULAR, 13, MARGIN, y, 0);
-	char f_str[64];
-	snprintf(f_str, sizeof(f_str), "%.0f MHz (260, 455, 572 MHz)", mhz);
+	char f_str[96];
+	if (cur_f[0])
+		snprintf(f_str, sizeof(f_str), "%d MHz (%s)", atoi(cur_f) / 1000000, phone->gpu_range);
+	else if (phone->gpu_devfreq)
+		snprintf(f_str, sizeof(f_str), "%s", phone->gpu_range);
+	else
+		snprintf(f_str, sizeof(f_str), "%s, no frequency scaling yet", phone->gpu_range);
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	zmc_text(cr, f_str, FONT_REGULAR, 16, MARGIN, y + 20, 0);
 	y += 52;
 
-	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
-	zmc_text(cr, "Devfreq Governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
-	zmc_set_rgb(cr, ACCENTS[app.accent].color);
-	zmc_text(cr, app.gpu_gov, FONT_SEMILIGHT, 22, MARGIN, y + 20, 0);
-	zmc_add_hit(0, y - 4, zmc.width, 54, ACT_GPU_GOVERNOR, 0);
-	y += 62;
+	if (phone->gpu_devfreq) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, "Devfreq Governor (tap to switch)", FONT_REGULAR, 13, MARGIN, y, 0);
+		zmc_set_rgb(cr, ACCENTS[app.accent].color);
+		zmc_text(cr, app.gpu_gov, FONT_SEMILIGHT, 22, MARGIN, y + 20, 0);
+		zmc_add_hit(0, y - 4, zmc.width, 54, ACT_GPU_GOVERNOR, 0);
+		y += 62;
+	}
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Display Hardware", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Super AMOLED 1440x2960 @ 60.00 Hz", FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	zmc_text(cr, phone->display, FONT_REGULAR, 15, MARGIN, y + 20, 0);
 	y += 52;
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Display Compositor", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	zmc_text(cr, "Wayland / wlroots 0.20 + OpenGL ES 2.0", FONT_REGULAR, 15, MARGIN, y + 20, 0);
+	zmc_text(cr, phone->compositor, FONT_REGULAR, 15, MARGIN, y + 20, 0);
 
 	return y + 60;
 }
@@ -2140,7 +2222,33 @@ static double draw_about(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Phone", FONT_REGULAR, 13, MARGIN, y, 0);
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	y += zmc_text(cr, "Samsung Galaxy S9 (SM-G960N starlte)", FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
+	y += zmc_text(cr, phone->model, FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
+
+	char mah[32];
+	read_phone_file(phone->battery, "charge_full_design", mah, sizeof(mah));
+	struct sysinfo mem;
+	char ram[48] = "";
+	if (sysinfo(&mem) == 0)
+		snprintf(ram, sizeof(ram), "%s (%.2f GB usable)", phone->ram,
+			(double)mem.totalram * mem.mem_unit / (1024.0 * 1024 * 1024));
+	char battery[48] = "";
+	if (mah[0])
+		snprintf(battery, sizeof(battery), "%ld mAh", atol(mah) / 1000);
+	const char *const hw[][2] = {
+		{ "Processor", phone->soc },
+		{ "Memory", ram[0] ? ram : phone->ram },
+		{ "Graphics", phone->gpu },
+		{ "Display", phone->display },
+		{ "Battery", battery },
+	};
+	for (size_t i = 0; i < sizeof(hw) / sizeof(hw[0]); i++) {
+		if (!hw[i][1][0])
+			continue;
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, hw[i][0], FONT_REGULAR, 13, MARGIN, y, 0);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		y += zmc_text(cr, hw[i][1], FONT_SEMILIGHT, 19, MARGIN, y + 18, zmc.width - 2 * MARGIN) + 30;
+	}
 
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Operating System", FONT_REGULAR, 13, MARGIN, y, 0);
@@ -2205,8 +2313,8 @@ static double draw_perf(cairo_t *cr) {
 	y = zmc_field(cr, y, "Tickle now", app.tickle_now);
 
 	char value[160], a[32], b[32], online[32];
-	read_sys_file("/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq", a, sizeof(a));
-	read_sys_file("/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq", b, sizeof(b));
+	read_phone_file(phone->little_policy, "scaling_max_freq", a, sizeof(a));
+	read_phone_file(phone->big_policy, "scaling_max_freq", b, sizeof(b));
 	read_sys_file("/sys/devices/system/cpu/online", online, sizeof(online));
 	snprintf(value, sizeof(value), "little %d MHz, big %d MHz, cores %s online",
 		atoi(a) / 1000, atoi(b) / 1000, online);
@@ -2342,6 +2450,14 @@ static void activate(int action, int arg) {
 		}
 		if (arg == PAGE_WALLS) {
 			wall_cat_open = -1;	/* opens on the categories */
+			/* look again: photos may have come into ~/Pictures since */
+			for (int k = 0; k < MAX_WALLS; k++) {
+				if (wall_thumbs[k]) {
+					cairo_surface_destroy(wall_thumbs[k]);
+					wall_thumbs[k] = NULL;
+				}
+			}
+			n_walls = -1;
 		}
 		zmc_go(arg, 1);
 		break;
