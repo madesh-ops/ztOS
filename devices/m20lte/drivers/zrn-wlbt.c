@@ -209,7 +209,7 @@ struct zrn_wlbt {
 	struct mx_stream mgmt_in, mgmt_out, gdb_r4_in, gdb_r4_out,
 			 gdb_m4_in, gdb_m4_out, mxlog;
 	struct completion started, halted;
-	int mbox_irq;
+	int mbox_irq, wdog_irq;		/* enabled only while running */
 	u32 rf_hw_ver;
 	spinlock_t log_lock;
 	u32 log[MXLOG_KEEP];
@@ -498,7 +498,8 @@ static int zrn_wlbt_stop(struct zrn_wlbt *w)
 			dev_info(w->dev, "no MM_HALT_RSP, stopping anyway\n");
 	}
 	WRITE_ONCE(w->running, false);
-	synchronize_irq(w->mbox_irq);
+	disable_irq(w->mbox_irq);
+	disable_irq(w->wdog_irq);
 	mbox_reset(w);
 
 	regmap_update_bits(w->pmu, RESET_AHEAD_WIFI, 0x3, 0);
@@ -598,6 +599,8 @@ static int zrn_wlbt_boot(struct zrn_wlbt *w)
 	w->rf_hw_ver = 0;
 	w->log_head = w->log_count = 0;
 	WRITE_ONCE(w->running, true);
+	enable_irq(w->mbox_irq);
+	enable_irq(w->wdog_irq);
 	regmap_write(w->pmu, WLBT_BOOT_TEST_RST_CFG, 0);
 	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG1, (w->mem_phys & 0xffffc000) >> 12);
 	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG0, w->mem_size >> 12);
@@ -736,14 +739,16 @@ static int zrn_wlbt_probe(struct platform_device *pdev)
 	if (irq < 0)
 		return irq;
 	w->mbox_irq = irq;
-	ret = devm_request_threaded_irq(dev, irq, NULL, zrn_wlbt_mbox_irq, IRQF_ONESHOT,
-					"zrn-wlbt-mbox", w);
+	/* off until a boot is asked for: whatever the subsystem left pending stays quiet */
+	ret = devm_request_threaded_irq(dev, irq, NULL, zrn_wlbt_mbox_irq,
+					IRQF_ONESHOT | IRQF_NO_AUTOEN, "zrn-wlbt-mbox", w);
 	if (ret)
 		return ret;
 	irq = platform_get_irq_byname(pdev, "wdog");
 	if (irq < 0)
 		return irq;
-	ret = devm_request_irq(dev, irq, zrn_wlbt_wdog_irq, 0, "zrn-wlbt-wdog", w);
+	w->wdog_irq = irq;
+	ret = devm_request_irq(dev, irq, zrn_wlbt_wdog_irq, IRQF_NO_AUTOEN, "zrn-wlbt-wdog", w);
 	if (ret)
 		return ret;
 
