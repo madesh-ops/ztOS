@@ -206,6 +206,38 @@
 		compatible = "syscon";
 		reg = <0x0 0x10032000 0x10>;
 	};
+
+	/*
+	 * ACPM, the APM firmware's message queues: acpm_ipc in the M20 kernel's
+	 * exynos7885.dtsi (SRAM 0x02052000, 0x1b000 bytes, channel descriptors
+	 * at 0x4b80; doorbell mailbox 0x11c40000). It is how the S2MPU08 PMIC is
+	 * reached. The SRAM has no compatible, so nothing claims it at boot: it
+	 * only tells ACPM where the queues are. Nothing here loads on its own:
+	 * acpm-protocol.ko, zrn-acpm-mbox.ko and zrn-s2mpu08-g3d.ko have no
+	 * module aliases for these nodes yet.
+	 */
+	apm_sram: sram@2052000 {
+		reg = <0x0 0x02052000 0x1b000>;
+	};
+
+	firmware {
+		acpm_ipc: power-management {
+			compatible = "samsung,exynos7885-acpm-ipc";
+			mboxes = <&ap2apm_mailbox>;
+			shmem = <&apm_sram>;
+		};
+	};
+
+	/*
+	 * The Mali-G71's supply, the S2MPU08's BUCK5, over ACPM channel 2
+	 * (devices/m20lte/drivers/zrn-s2mpu08-g3d.c). No voltage limits: the
+	 * regulator core may only read it.
+	 */
+	vdd_g3d: regulator-vdd-g3d {
+		compatible = "samsung,s2mpu08-acpm-buck5";
+		samsung,acpm-ipc = <&acpm_ipc 2>;
+		regulator-name = "vdd_g3d";
+	};
 };
 
 &soc {
@@ -327,6 +359,17 @@
 		};
 	};
 
+	/* The GPU's clocks (CMU_G3D, patch-kernel.py): described so the rate
+	 * the bootloader set can be read (clk_summary), and nothing more yet.
+	 * No consumer: the GPU still runs from gpu_clk. */
+	cmu_g3d: clock-controller@11400000 {
+		compatible = "samsung,exynos7885-cmu-g3d";
+		reg = <0x11400000 0x8000>;
+		#clock-cells = <1>;
+		clocks = <&oscclk>, <&cmu_top CLK_DOUT_G3D_SWITCH>;
+		clock-names = "oscclk", "dout_g3d_switch";
+	};
+
 	/* Mali-G71 MP2 (GPU_ID 0x60a00002, r0p0): mali@11500000 in the M20
 	 * kernel's exynos7885-mali_common.dtsi, with its JOB, MMU and GPU
 	 * interrupts. Its power domain (PMU 0x11c840a0) and its clock are on
@@ -356,6 +399,13 @@
 		interrupt-names = "mbox", "wdog";
 		samsung,syscon-phandle = <&pmu_system_controller>;
 		memory-region = <&wlbt_mem>;
+	};
+
+	/* The AP-to-APM doorbell ACPM rings (drivers/zrn-acpm-mbox.c) */
+	ap2apm_mailbox: mailbox@11c40000 {
+		compatible = "samsung,exynos7885-acpm-mbox";
+		reg = <0x11c40000 0x1000>;
+		#mbox-cells = <0>;
 	};
 
 	/* ZTOS-WATCHDOG: WDT at 0x10060000, A53 cluster: PMU 0x408/0x40c

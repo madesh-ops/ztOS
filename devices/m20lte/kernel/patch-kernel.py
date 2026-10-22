@@ -553,3 +553,278 @@ insert(WDT, '"samsung,exynos7885-wdt"',
        """	{ .compatible = "samsung,exynos7885-wdt",
 	  .data = &drv_data_exynos7885 },
 """)
+
+
+def replace(rel, marker, old, new):
+    path = tree / rel
+    s = read(path)
+    if marker in s:
+        print(f"patch-kernel: {rel}: already")
+        return
+    if s.count(old) != 1:
+        sys.exit(f"patch-kernel: {rel}: expected the text once, found {s.count(old)}:\n{old}")
+    write(path, s.replace(old, new))
+    print(f"patch-kernel: {rel}: done")
+
+
+# --- ACPM -------------------------------------------------------------------------
+# ACPM, the APM firmware's message protocol, is how the AP reaches the S2MPU08
+# PMIC (the GPU's BUCK5, the codec) on this SoC. Mainline speaks it for gs101;
+# the Exynos 7885/7904 has the same channel descriptors at SRAM offset 0x4b80
+# (acpm_ipc in Samsung's exynos7885.dtsi). After the Galaxy Tab A 10.1 2019
+# port (github.com/Mollomm1/linux-exynos7885, branch gta3xl), reduced to what
+# reading a PMIC register needs:
+#   - only the APM's polled message queues are used; its other descriptors
+#     (notification and buffer channels, which need an interrupt handler this
+#     driver does not have) are left alone;
+#   - a descriptor is used only once everything it points at fits in the SRAM,
+#     so a wrong layout fails the probe instead of writing into the APM's memory;
+#   - no ACPM clocks (the 7885's CPU and GPU clocks are the CMUs');
+#   - the 7885 is not in the module alias table: the module is only ever loaded
+#     by hand while this is being brought up.
+# The doorbell is drivers/zrn-acpm-mbox.c.
+ACPM = "drivers/firmware/samsung/exynos-acpm.c"
+insert(ACPM, "ACPM_EXYNOS7885_INITDATA_BASE",
+       "#define ACPM_GS101_INITDATA_BASE\t0xa000\n",
+       """#define ACPM_EXYNOS7885_INITDATA_BASE\t0x4b80
+/* Exynos 7885: acpm_chan_shmem.reserved[2] is the channel's type */
+#define ACPM_EXYNOS7885_CHAN_QUEUE\t1
+""")
+insert(ACPM, "@exynos7885:",
+       " * @num_chans:\tnumber of channels available for this controller.\n",
+       " * @sram_size:\tsize of the SRAM.\n"
+       " * @exynos7885:\tthe Exynos 7885's layout (polled queues only, all checked).\n")
+insert(ACPM, "bool exynos7885;",
+       "\tstruct acpm_handle handle;\n\tu32 num_chans;\n",
+       "\tresource_size_t sram_size;\n\tbool exynos7885;\n")
+insert(ACPM, "acpm_exynos7885_chan_usable",
+       "/**\n * acpm_channels_init() - initialize",
+       """static bool acpm_sram_fits(struct acpm_info *acpm, u32 off, size_t len)
+{
+	return !(off & 3) && off <= acpm->sram_size &&
+	       len <= acpm->sram_size - off;
+}
+
+/*
+ * Exynos 7885: use a descriptor only if it is a polled message queue whose
+ * id is its index (the doorbell rings the index) and whose queues and
+ * indices all lie in the SRAM. Returns 1 to use it, 0 to leave it alone,
+ * -EINVAL for a queue that makes no sense.
+ */
+static int acpm_exynos7885_chan_usable(struct acpm_info *acpm,
+				       struct acpm_chan_shmem __iomem *c, int i)
+{
+	u32 id = readl(&c->id), type = readl(&c->reserved[2]);
+	u32 qlen = readl(&c->qlen), mlen = readl(&c->mlen);
+	u32 poll = readl(&c->poll_completion);
+	u32 idx[4] = { readl(&c->rx_rear), readl(&c->rx_front),
+		       readl(&c->tx_rear), readl(&c->tx_front) };
+	size_t qsize = (size_t)qlen * mlen;
+	int j;
+
+	dev_info(acpm->dev, "descriptor %d: id %u type %u poll %u qlen %u mlen %u\\n",
+		 i, id, type, poll, qlen, mlen);
+	if (type != ACPM_EXYNOS7885_CHAN_QUEUE || !poll)
+		return 0;
+	if (id != i || qlen < 2 || qlen > 1024 || !mlen || mlen > 256 || mlen & 3 ||
+	    !acpm_sram_fits(acpm, readl(&c->rx_base), qsize) ||
+	    !acpm_sram_fits(acpm, readl(&c->tx_base), qsize))
+		goto bad;
+	for (j = 0; j < ARRAY_SIZE(idx); j++)
+		if (!acpm_sram_fits(acpm, idx[j], sizeof(u32)) ||
+		    readl(acpm->sram_base + idx[j]) >= qlen)
+			goto bad;
+	return 1;
+bad:
+	dev_err(acpm->dev, "descriptor %d does not fit the SRAM\\n", i);
+	return -EINVAL;
+}
+
+""", after=False)
+insert(ACPM, "implausible ACPM channel table",
+       "\tacpm->chans = devm_kcalloc(dev, acpm->num_chans,",
+       """\tif (acpm->exynos7885 &&
+	    (!acpm->num_chans || acpm->num_chans > 16 ||
+	     !acpm_sram_fits(acpm, readl(&shmem->chans),
+			     acpm->num_chans * sizeof(struct acpm_chan_shmem))))
+		return dev_err_probe(dev, -EINVAL, "implausible ACPM channel table\\n");
+""", after=False)
+insert(ACPM, "acpm_exynos7885_chan_usable(acpm, chan_shmem, i)",
+       "\t\tachan->acpm = acpm;\n",
+       """
+		if (acpm->exynos7885) {
+			ret = acpm_exynos7885_chan_usable(acpm, chan_shmem, i);
+			if (ret < 0)
+				return ret;
+			if (!ret)
+				continue;
+		}
+""")
+insert(ACPM, "match_data->initdata_base == ACPM_EXYNOS7885_INITDATA_BASE",
+       "\tacpm->shmem = acpm->sram_base + match_data->initdata_base;\n",
+       """\tacpm->sram_size = size;
+	acpm->exynos7885 = match_data->initdata_base == ACPM_EXYNOS7885_INITDATA_BASE;
+	if (acpm->exynos7885 && !acpm_sram_fits(acpm, match_data->initdata_base,
+						sizeof(struct acpm_shmem)))
+		return dev_err_probe(dev, -EINVAL, "initdata beyond the SRAM\\n");
+""", after=False)
+insert(ACPM, "if (!match_data->acpm_clk_dev_name)",
+       "\tacpm_clk_pdev = platform_device_register_data(dev,",
+       """\t/* no ACPM clocks on the Exynos 7885 */
+	if (!match_data->acpm_clk_dev_name)
+		return devm_of_platform_populate(dev);
+
+""", after=False)
+insert(ACPM, "acpm_exynos7885 = {",
+       "static const struct of_device_id acpm_match[] = {",
+       """static const struct acpm_match_data acpm_exynos7885 = {
+	.initdata_base = ACPM_EXYNOS7885_INITDATA_BASE,
+};
+
+""", after=False)
+insert(ACPM, '"samsung,exynos7885-acpm-ipc"',
+       "\t\t.data = &acpm_gs101,\n\t},\n",
+       """\t{
+		.compatible = "samsung,exynos7885-acpm-ipc",
+		.data = &acpm_exynos7885,
+	},
+""")
+replace(ACPM, "acpm_autoload",
+        "MODULE_DEVICE_TABLE(of, acpm_match);",
+        """/* gs101 only: the Exynos 7885 is loaded by hand while it is brought up */
+static const struct of_device_id acpm_autoload[] = {
+	{ .compatible = "google,gs101-acpm-ipc" },
+	{},
+};
+MODULE_DEVICE_TABLE(of, acpm_autoload);""")
+
+# --- GPU clocks ---------------------------------------------------------------------
+# CMU_G3D (0x11400000), the Mali-G71's clocks: PLL_G3D, the CMU_TOP switching
+# clock as the alternative, and the BUSD mux that clocks the core and its bus.
+# Register layout and the PLL's levels (the bootloader's ECT, 343 to 845 MHz)
+# from the Galaxy Tab A 10.1 2019 port (github.com/Mollomm1/linux-exynos7885,
+# branch gta3xl), which follows Samsung's CAL tables.
+#
+# For now only described, so the kernel can read what the bootloader set: only
+# PLL, mux and divider registers are listed, so registering writes nothing
+# (exynos_arm64_init_clocks() only touches gate registers), no clock of it is
+# enabled, and the GPU keeps its fixed clock in the device tree. Its power
+# domain is the bootloader's and stays on (pd_ignore_unused); before anything
+# here can change a rate, PLL_G3D's relock needs the GPU parked on the switching
+# clock, as Samsung's DVFS and the T510 port do.
+CLKH = "include/dt-bindings/clock/exynos7885.h"
+insert(CLKH, "CLK_DOUT_G3D_SWITCH",
+       "#define CLK_MOUT_SHARED1_PLL\t\t62\n",
+       "#define CLK_GOUT_G3D_SWITCH\t\t63\n#define CLK_DOUT_G3D_SWITCH\t\t64\n")
+insert(CLKH, "CLK_MOUT_G3D_BUSD",
+       "#endif /* _DT_BINDINGS_CLOCK_EXYNOS_7885_H */",
+       """/* CMU_G3D */
+#define CLK_FOUT_G3D_PLL\t\t1
+#define CLK_MOUT_G3D_PLL\t\t2
+#define CLK_MOUT_G3D_SWITCH_USER\t3
+#define CLK_MOUT_G3D_BUSD\t\t4
+#define CLK_DOUT_G3D_BUSP\t\t5
+
+""", after=False)
+
+CLK = "drivers/clk/samsung/clk-exynos7885.c"
+replace(CLK, "(CLK_DOUT_G3D_SWITCH + 1)",
+        "#define CLKS_NR_TOP\t\t\t(CLK_MOUT_SHARED1_PLL + 1)",
+        "#define CLKS_NR_TOP\t\t\t(CLK_DOUT_G3D_SWITCH + 1)")
+insert(CLK, "CLKS_NR_G3D",
+       "#define CLKS_NR_FSYS\t\t\t(CLK_FSYS_USB30DRD_REF_CLK + 1)\n",
+       "#define CLKS_NR_G3D\t\t\t(CLK_DOUT_G3D_BUSP + 1)\n")
+insert(CLK, "CLK_CON_DIV_CLKCMU_G3D_SWITCH",
+       "#define CLK_CON_DIV_CLKCMU_FSYS_USB30DRD\t0x1854\n",
+       "#define CLK_CON_DIV_CLKCMU_G3D_SWITCH\t\t0x1858\n")
+insert(CLK, "CLK_CON_GAT_GATE_CLKCMU_G3D_SWITCH",
+       "#define CLK_CON_GAT_GATE_CLKCMU_FSYS_USB30DRD\t0x2054\n",
+       "#define CLK_CON_GAT_GATE_CLKCMU_G3D_SWITCH\t0x2058\n")
+# the divider is saved with CMU_TOP's registers; the gate is not listed, so it
+# keeps the bootloader's mode
+insert(CLK, "\tCLK_CON_DIV_CLKCMU_G3D_SWITCH,\n",
+       "\tCLK_CON_DIV_CLKCMU_FSYS_USB30DRD,\n",
+       "\tCLK_CON_DIV_CLKCMU_G3D_SWITCH,\n")
+insert(CLK, '"dout_g3d_switch", "gout_g3d_switch"',
+       "\t    CLK_CON_DIV_CLKCMU_FSYS_USB30DRD, 0, 4),\n",
+       """	DIV(CLK_DOUT_G3D_SWITCH, "dout_g3d_switch", "gout_g3d_switch",
+	    CLK_CON_DIV_CLKCMU_G3D_SWITCH, 0, 3),
+""")
+insert(CLK, '"gout_g3d_switch", "dout_shared0_div2"',
+       "\t     CLK_CON_GAT_GATE_CLKCMU_FSYS_USB30DRD, 21, 0, 0),\n",
+       """	/* G3D: the GPU's clock while PLL_G3D relocks */
+	GATE(CLK_GOUT_G3D_SWITCH, "gout_g3d_switch", "dout_shared0_div2",
+	     CLK_CON_GAT_GATE_CLKCMU_G3D_SWITCH, 21, 0, 0),
+""")
+insert(CLK, "g3d_cmu_info",
+       "static int __init exynos7885_cmu_probe",
+       """/* ---- CMU_G3D ------------------------------------------------------------- */
+
+/* Register Offset definitions for CMU_G3D (0x11400000) */
+#define PLL_LOCKTIME_PLL_G3D			0x0000
+#define PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER	0x0100
+#define PLL_CON0_PLL_G3D			0x0120
+#define CLK_CON_MUX_MUX_CLK_G3D_BUSD		0x1004
+#define CLK_CON_DIV_DIV_CLK_G3D_BUSP		0x1800
+
+/* no gate registers: registering CMU_G3D writes nothing */
+static const unsigned long g3d_clk_regs[] __initconst = {
+	PLL_LOCKTIME_PLL_G3D,
+	PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER,
+	PLL_CON0_PLL_G3D,
+	CLK_CON_MUX_MUX_CLK_G3D_BUSD,
+	CLK_CON_DIV_DIV_CLK_G3D_BUSP,
+};
+
+/* the GPU's levels, with the bootloader ECT's P/M/S */
+static const struct samsung_pll_rate_table g3d_pll_rates[] __initconst = {
+	PLL_35XX_RATE(26 * MHZ, 845000000U, 130, 4, 0),
+	PLL_35XX_RATE(26 * MHZ, 676000000U, 104, 4, 0),
+	PLL_35XX_RATE(26 * MHZ, 545000000U, 545, 13, 1),
+	PLL_35XX_RATE(26 * MHZ, 450000000U, 450, 13, 1),
+	PLL_35XX_RATE(26 * MHZ, 343000000U, 343, 13, 1),
+};
+
+static const struct samsung_pll_clock g3d_pll_clks[] __initconst = {
+	PLL(pll_1417x, CLK_FOUT_G3D_PLL, "fout_g3d_pll", "oscclk",
+	    PLL_LOCKTIME_PLL_G3D, PLL_CON0_PLL_G3D, g3d_pll_rates),
+};
+
+PNAME(mout_g3d_pll_p)		= { "oscclk", "fout_g3d_pll" };
+PNAME(mout_g3d_switch_user_p)	= { "oscclk", "dout_g3d_switch" };
+PNAME(mout_g3d_busd_p)		= { "mout_g3d_pll", "mout_g3d_switch_user" };
+
+static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
+	MUX(CLK_MOUT_G3D_PLL, "mout_g3d_pll", mout_g3d_pll_p,
+	    PLL_CON0_PLL_G3D, 4, 1),
+	MUX(CLK_MOUT_G3D_SWITCH_USER, "mout_g3d_switch_user",
+	    mout_g3d_switch_user_p, PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER, 4, 1),
+	/* clocks both the Mali core and the G3D data bus */
+	MUX(CLK_MOUT_G3D_BUSD, "mout_g3d_busd", mout_g3d_busd_p,
+	    CLK_CON_MUX_MUX_CLK_G3D_BUSD, 0, 1),
+};
+
+static const struct samsung_div_clock g3d_div_clks[] __initconst = {
+	DIV(CLK_DOUT_G3D_BUSP, "dout_g3d_busp", "mout_g3d_busd",
+	    CLK_CON_DIV_DIV_CLK_G3D_BUSP, 0, 3),
+};
+
+static const struct samsung_cmu_info g3d_cmu_info __initconst = {
+	.pll_clks		= g3d_pll_clks,
+	.nr_pll_clks		= ARRAY_SIZE(g3d_pll_clks),
+	.mux_clks		= g3d_mux_clks,
+	.nr_mux_clks		= ARRAY_SIZE(g3d_mux_clks),
+	.div_clks		= g3d_div_clks,
+	.nr_div_clks		= ARRAY_SIZE(g3d_div_clks),
+	.nr_clk_ids		= CLKS_NR_G3D,
+	.clk_regs		= g3d_clk_regs,
+	.nr_clk_regs		= ARRAY_SIZE(g3d_clk_regs),
+};
+
+""", after=False)
+insert(CLK, '"samsung,exynos7885-cmu-g3d"',
+       "\t\t.data = &fsys_cmu_info,\n",
+       """	}, {
+		.compatible = "samsung,exynos7885-cmu-g3d",
+		.data = &g3d_cmu_info,
+""")

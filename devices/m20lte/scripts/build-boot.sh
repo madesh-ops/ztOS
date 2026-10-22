@@ -215,6 +215,13 @@ make -s -j"$(nproc)" O=out modules_prepare >> "$B/kernel-m20lte-build.log" 2>&1
 # module of defconfig just to get Module.symvers would take longer than the
 # kernel. vmlinux.symvers is exactly those exports.
 [ -s out/Module.symvers ] || cp out/vmlinux.symvers out/Module.symvers
+# ACPM (how the AP reaches the PMIC on this SoC, patched by patch-kernel.py)
+# is a module too: built on its own, which adds its exports to Module.symvers
+# for zrn-s2mpu08-g3d, and shipped with the M20's modules.
+make -s O=out drivers/firmware/samsung/acpm-protocol.ko >> "$B/kernel-m20lte-build.log" 2>&1 || {
+	grep -nE 'error:|Error [0-9]' "$B/kernel-m20lte-build.log" | tail -20
+	exit 1
+}
 IMAGE=$SRC/out/arch/arm64/boot/Image
 DTB=$SRC/out/arch/arm64/boot/dts/exynos/exynos7904-m20lte.dtb
 ls -l "$IMAGE" "$DTB"
@@ -224,6 +231,7 @@ make -s -C "$SRC" O="$SRC/out" M="$DEV/drivers" modules > "$B/modules-m20lte-bui
 	tail -n 30 "$B/modules-m20lte-build.log"
 	exit 1
 }
+cp out/drivers/firmware/samsung/acpm-protocol.ko "$DEV/drivers/"
 ls -l "$DEV"/drivers/*.ko
 
 echo "=== uniLoader ==="

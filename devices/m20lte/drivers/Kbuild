@@ -1,3 +1,5 @@
 obj-m += zrn-lm3632-bl.o
 obj-m += zrn-s2mu004-fg.o
 obj-m += zrn-wlbt.o
+obj-m += zrn-acpm-mbox.o
+obj-m += zrn-s2mpu08-g3d.o
