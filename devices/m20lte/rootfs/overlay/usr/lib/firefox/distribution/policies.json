@@ -1,11 +1,7 @@
 {
   "policies": {
     "Proxy": {
-      "Mode": "manual",
-      "SOCKSProxy": "127.0.0.1:1080",
-      "SOCKSVersion": 5,
-      "UseProxyForDNS": true,
-      "Passthrough": "localhost, 127.0.0.1, 172.16.42.0/24"
+      "Mode": "none"
     },
     "Preferences": {
       "gfx.webrender.software": {
