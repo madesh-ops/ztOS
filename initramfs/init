@@ -1,5 +1,7 @@
 #!/bin/sh
-# zboot: boot stage for the Galaxy S9 (starlte) on a mainline kernel.
+# zboot: boot stage for ztOS's phones (Galaxy S9 "starlte", Galaxy M20
+# "m20lte") on a mainline kernel. Nothing here is specific to one phone: the
+# root is found by its label, and the phone names itself from its device tree.
 #
 # Phase covered here: rescue shell (M1) and Arch Linux ARM from the internal
 # UFS (M4). The postmarketOS entry and the on-screen menu come later.
@@ -23,6 +25,10 @@ mount -t devpts devpts /dev/pts 2>/dev/null
 
 echo 1 > /proc/sys/kernel/sysrq
 
+# the phone, as its device tree names it: "Samsung Galaxy M20", "m20lte"
+MODEL=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)
+DEVICE=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1 | cut -d, -f2)
+
 LOG=/run/zboot.log
 log() {
 	echo "zboot| $*" > /dev/kmsg 2>/dev/null
@@ -31,6 +37,50 @@ log() {
 
 arg() {
 	sed -n "s/.*\b$1=\([^ ]*\).*/\1/p" /proc/cmdline
+}
+
+# With zboot.savelog=1, this boot's log is kept on the phone's CACHE partition
+# (ext4, for Android's temporary files: nothing of the user's), as
+# /cache/ztos/boot-N.log, readable from TWRP/OrangeFox afterwards. For bring-up
+# on a phone that has no working USB yet.
+save_log() {
+	[ "$(arg zboot.savelog)" = 1 ] || return 0
+	dev=
+	for u in /sys/class/block/*/uevent; do
+		grep -qx 'PARTNAME=CACHE' "$u" 2>/dev/null || continue
+		dev=/dev/$(sed -n 's/^DEVNAME=//p' "$u")
+		break
+	done
+	[ -b "$dev" ] || { log "savelog: no CACHE partition"; return 1; }
+	mkdir -p /run/cache
+	mount -t ext4 -o rw,noatime "$dev" /run/cache 2>/dev/null || { log "savelog: $dev is not ext4"; return 1; }
+	mkdir -p /run/cache/ztos
+	n=$(ls /run/cache/ztos 2>/dev/null | wc -l)
+	f=/run/cache/ztos/boot-$((n + 1)).log
+	{
+		echo "== $* (uptime $(cut -d' ' -f1 /proc/uptime) s)"
+		echo "== cmdline: $(cat /proc/cmdline)"
+		echo "== cpus online: $(cat /sys/devices/system/cpu/online)"
+		echo "== zboot.log"; cat "$LOG" 2>/dev/null
+		echo "== block devices"; ls /sys/class/block 2>/dev/null | tr '\n' ' '; echo
+		echo "== udc: $(ls /sys/class/udc 2>/dev/null)"
+		# zboot.regor=ADDR:BITS,...: OR bits into registers first (to ungate
+		# a block's clock so its registers can be read), then
+		# zboot.regdump=ADDR,ADDR,...: 32-bit registers, for bring-up
+		for ab in $(arg zboot.regor | tr ',' ' '); do
+			a=${ab%%:*} b=${ab#*:}
+			v=$(devmem "$a" 32 2>/dev/null) || continue
+			devmem "$a" 32 $((v | b)) 2>/dev/null
+			echo "== regor $a: $v | $b -> $(devmem "$a" 32 2>&1)"
+		done
+		for a in $(arg zboot.regdump | tr ',' ' '); do
+			echo "== reg $a = $(devmem "$a" 32 2>&1)"
+		done
+		echo "== dmesg"; dmesg
+	} > "$f" 2>&1
+	sync
+	umount /run/cache
+	log "savelog: $f on $dev"
 }
 
 log "===== zboot on $(uname -r), $(cat /proc/device-tree/model 2>/dev/null) ====="
@@ -52,6 +102,7 @@ if [ "$DEADMAN" -gt 0 ] 2>/dev/null; then
 		sleep "$DEADMAN"
 		[ -e /run/zboot.hold ] && exit 0
 		echo "zboot| deadman fired in the boot stage" > /dev/kmsg 2>/dev/null
+		save_log "deadman fired in the boot stage"
 		echo b > /proc/sysrq-trigger 2>/dev/null
 	) &
 	EARLY_DEADMAN=$!
@@ -93,8 +144,8 @@ usb_up() {
 	echo 0x0104 > "$g/idProduct"
 	mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409"
 	echo "zboot" > "$g/strings/0x409/manufacturer"
-	echo "Galaxy S9 zboot rescue" > "$g/strings/0x409/product"
-	echo "starlte" > "$g/strings/0x409/serialnumber"
+	echo "${MODEL:-phone} zboot rescue" > "$g/strings/0x409/product"
+	echo "${DEVICE:-zboot}" > "$g/strings/0x409/serialnumber"
 	echo "ncm+acm" > "$g/configs/c.1/strings/0x409/configuration"
 	mkdir -p "$g/functions/ncm.usb0" "$g/functions/acm.GS0"
 	echo 02:5a:42:00:00:01 > "$g/functions/ncm.usb0/dev_addr"
@@ -125,6 +176,18 @@ rescue() {
 	touch /run/zboot.hold 2>/dev/null
 	usb_up
 	cp "$LOG" /run/zboot.rescue 2>/dev/null
+	save_log "rescue shell: $*"
+	# zboot.rescue_timeout=N: leave the rescue shell after N seconds, through a
+	# reset that keeps the fallback target (TWRP), for a phone nobody can reach
+	RT=$(arg zboot.rescue_timeout)
+	if [ "${RT:-0}" -gt 0 ] 2>/dev/null; then
+		log "rescue: resetting in $RT s (zboot.rescue_timeout)"
+		(
+			sleep "$RT"
+			save_log "rescue timeout"
+			echo b > /proc/sysrq-trigger 2>/dev/null
+		) &
+	fi
 	while :; do
 		setsid sh -c 'exec sh -i </dev/tty0 >/dev/tty0 2>&1'
 		sleep 1

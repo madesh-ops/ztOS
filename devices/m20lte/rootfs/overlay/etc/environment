@@ -1,0 +1,15 @@
+#
+# This file is parsed by pam_env module
+#
+# Syntax: simple "KEY=VAL" pairs on separate lines
+#
+
+# Internet through the computer the phone is plugged into: the M20 has no Wi-Fi
+# driver yet, and devices/m20lte/scripts/usb-internet.sh, run on that computer,
+# opens a reverse SSH tunnel that is a SOCKS proxy here. Nothing else routes
+# out, so pointing everything at it costs nothing while it is down; take these
+# out once the phone has its own connection. sudo keeps them
+# (/etc/sudoers.d/10-proxy), so pacman works too.
+all_proxy=socks5h://127.0.0.1:1080
+ALL_PROXY=socks5h://127.0.0.1:1080
+no_proxy=localhost,127.0.0.1,172.16.42.0/24

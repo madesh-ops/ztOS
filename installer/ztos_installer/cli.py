@@ -4,6 +4,7 @@
     ztos install                 the guided installer (asks where, and who you are)
     ztos install --target qemu   ztOS in the QEMU emulator, to try it on this computer
     ztos install --target starlte   ztOS on a Galaxy S9
+    ztos install --target m20lte    ztOS on a Galaxy M20 (experimental: a port in bring-up)
     ztos emulator                start the emulator with the ztOS installed there
     ztos build --target T        only build the system (for qemu: the disk too)
     ztos guide                   how installing on the phone goes, step by step
@@ -62,20 +63,28 @@ def valid_timezone(name: str):
     return None if Path("/usr/share/zoneinfo", name).is_file() else "not a time zone (like Asia/Colombo, or UTC)"
 
 
-def wizard(args) -> b.Settings:
-    print(BANNER)
-    print("This installs ztOS: ztMETRO's phone shell on Arch Linux ARM, with its apps and the SDK.\n")
+def choose_target(args) -> str:
+    """Where ztOS goes; for a phone, its guide is shown and agreed to first."""
     if args.target:
         target = args.target
     else:
         print("Where should ztOS go?")
         print("  1. the emulator (QEMU) on this computer: try it, nothing else is touched")
         print("  2. a Samsung Galaxy S9 (starlte): replaces Android, erases the phone's data")
-        target = {"1": "qemu", "2": "starlte"}[prompt("1 or 2", "1", lambda a: None if a in ("1", "2") else "1 or 2")]
-    if target == "starlte":
-        print(t.PHONE_GUIDE)
+        print("  3. a Samsung Galaxy M20 (m20lte): EXPERIMENTAL, replaces Android, erases the phone's data")
+        target = {"1": "qemu", "2": "starlte", "3": "m20lte"}[
+            prompt("1, 2 or 3", "1", lambda a: None if a in ("1", "2", "3") else "1, 2 or 3")]
+    if target in b.PHONES:
+        print(t.guide(target))
         if not ask("Go on?", default=False):
             sys.exit(0)
+    return target
+
+
+def wizard(args) -> b.Settings:
+    print(BANNER)
+    print("This installs ztOS: ztMETRO's phone shell on Arch Linux ARM, with its apps and the SDK.\n")
+    target = choose_target(args)
     s = b.Settings(target=target)
     print("\nYour account on ztOS")
     s.user = args.user or prompt("  user name", "ztos", valid_user)
@@ -95,7 +104,7 @@ def wizard(args) -> b.Settings:
                                          lambda a: None if re.fullmatch(r"[a-zA-Z0-9-]{1,63}", a) else "letters, digits and -")
     s.timezone = args.timezone or prompt("  time zone", "UTC", valid_timezone)
     s.fresh = args.fresh
-    print(f"\nztOS for {'the emulator' if target == 'qemu' else 'the Galaxy S9'}, user {s.user}, "
+    print(f"\nztOS for {t.NAMES[target]}, user {s.user}, "
           f"named {s.hostname}, time zone {s.timezone}.")
     print("Building it downloads about 2 GB and takes a while (30-60 minutes: ARM programs run emulated because this computer is x86).")
     if not args.yes and not ask("Start?"):
@@ -121,17 +130,9 @@ def cmd_install(args):
         mode = mode or "build-install"
 
     if mode == "download":
-        if args.target:
-            target = args.target
-        else:
-            print("\nWhere should ztOS go?")
-            print("  1. the emulator (QEMU) on this computer: try it, nothing else is touched")
-            print("  2. a Samsung Galaxy S9 (starlte): replaces Android, erases the phone's data")
-            target = {"1": "qemu", "2": "starlte"}[prompt("1 or 2", "1", lambda a: None if a in ("1", "2") else "1 or 2")]
-        if target == "starlte":
-            print(t.PHONE_GUIDE)
-            if not ask("Go on?", default=False):
-                sys.exit(0)
+        print()
+        target = choose_target(args)
+        args.target = target            # asked once: a build instead goes to the same place
         from . import download
         try:
             image, boot = download.get_prebuilt(target)
@@ -152,7 +153,7 @@ def cmd_install(args):
                 else:
                     print("Start it later with: installer/ztos emulator")
             else:
-                t.install_phone(image, ask)
+                t.install(target, image, ask)
             return
 
     s = wizard(args)
@@ -170,7 +171,7 @@ def cmd_install(args):
         else:
             print("Start it later with: installer/ztos emulator")
     else:
-        t.install_phone(image, ask)
+        t.install(s.target, image, ask)
 
 
 def cmd_build(args):
@@ -189,7 +190,8 @@ def cmd_screenshots(args):
 
 
 def cmd_guide(args):
-    print(t.PHONE_GUIDE)
+    for target in ([args.target] if args.target else b.PHONES):
+        print(t.guide(target))
 
 
 def cmd_doctor(args):
@@ -210,7 +212,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command")
 
     def with_settings(p):
-        p.add_argument("--target", choices=["qemu", "starlte"])
+        p.add_argument("--target", choices=["qemu", *b.PHONES])
         p.add_argument("--user")
         p.add_argument("--password", help="(else asked; never stored)")
         p.add_argument("--hostname")
@@ -235,7 +237,9 @@ def main(argv=None):
     p.add_argument("--out", default=str(b.ROOT / "docs" / "screenshots"))
     p.add_argument("--keep", action="store_true", help="leave the emulator running afterwards")
     p.set_defaults(func=cmd_screenshots)
-    sub.add_parser("guide", help="installing on the phone, step by step").set_defaults(func=cmd_guide)
+    p = sub.add_parser("guide", help="installing on a phone, step by step")
+    p.add_argument("--target", choices=b.PHONES)
+    p.set_defaults(func=cmd_guide)
     sub.add_parser("doctor", help="is this computer ready?").set_defaults(func=cmd_doctor)
 
     args = parser.parse_args(argv)

@@ -27,6 +27,7 @@ TARBALL_URL = "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
 SDK = ROOT / "sdk"
 PKGCACHE = ROOT / "build" / "pkg-cache"
 EDK2 = Path("/usr/share/edk2/aarch64")
+PHONES = ("starlte", "m20lte")      # the targets that are a phone (zboot boot image, ZR_ARCH root)
 
 
 class Fail(Exception):
@@ -35,7 +36,7 @@ class Fail(Exception):
 
 @dataclass
 class Settings:
-    target: str = "qemu"            # qemu | starlte
+    target: str = "qemu"            # qemu | starlte | m20lte
     user: str = "ztos"
     password: str = "ztos"
     hostname: str = "ztos"
@@ -143,7 +144,7 @@ rm -f "$R/etc/resolv.conf"; cp -L /etc/resolv.conf "$R/etc/resolv.conf"
 ch() { chroot "$R" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/bin HOME=/root LANG=C.UTF-8 "$@"; }
 P="pacman --disable-sandbox --noconfirm"
 
-if [ "$TARGET" = starlte ]; then
+if [ "$TARGET" = starlte ] || [ "$TARGET" = m20lte ]; then
 	# the kernel is ztOS's own boot image there, never a package
 	sed -i 's/^#\?IgnorePkg *=.*/IgnorePkg   = linux-aarch64 linux-aarch64-headers/' "$R/etc/pacman.conf"
 fi
@@ -222,6 +223,35 @@ if [ "$TARGET" = starlte ]; then
 	done
 	chmod 755 "$R"/usr/local/sbin/* 2>/dev/null || true
 fi
+if [ "$TARGET" = m20lte ]; then
+	# the S9's system files that are not about its hardware, then the M20's own
+	grep -v '^#' "$SRC/devices/m20lte/rootfs/from-s9" | while read -r f; do
+		[ -n "$f" ] || continue
+		install -D -m "$(stat -c %a "$SRC/rootfs/overlay/$f")" "$SRC/rootfs/overlay/$f" "$R/$f"
+	done
+	cp -a "$SRC/devices/m20lte/rootfs/overlay/." "$R/"
+	# git keeps no mode for these, and sudo ignores a sudoers file that is not 0440
+	chmod 440 "$R/etc/sudoers.d/10-proxy"
+	# The panel is the bootloader's and has no kernel driver: dsi.py talks to
+	# its DSIM over /dev/mem, as ztos-panel-selfmask does on the S9. On the
+	# phone it is ztos-m20-dsi (touch | init | cmd).
+	install -Dm755 "$SRC/devices/m20lte/scripts/dsi.py" "$R/usr/local/sbin/ztos-m20-dsi"
+	install -Dm644 "$SRC/devices/m20lte/scripts/m20_init_seq.py" "$R/usr/local/lib/ztos/m20_init_seq.py"
+	if [ -d "$SRC/build/wallpapers/backgrounds/ztos" ]; then
+		install -d "$R/usr/local/share/backgrounds"
+		cp -a "$SRC/build/wallpapers/backgrounds/ztos" "$R/usr/local/share/backgrounds/"
+	fi
+	install -d "$R/usr/lib/modules/7.1.0-zboot/extra"
+	for k in "$SRC"/devices/m20lte/drivers/*.ko; do
+		[ -f "$k" ] && install -m644 "$k" "$R/usr/lib/modules/7.1.0-zboot/extra/"
+	done
+	K=$SRC/build/linux-7.1-m20lte/out
+	if [ -f "$K/modules.builtin" ]; then
+		install -m644 "$K/modules.builtin" "$K/modules.builtin.modinfo" "$R/usr/lib/modules/7.1.0-zboot/"
+	fi
+	ch depmod -a 7.1.0-zboot > /dev/null 2>&1 || true
+	chmod 755 "$R"/usr/local/sbin/* 2>/dev/null || true
+fi
 install -d "$R/usr/local/share/fonts/selawik"
 install -m644 "$SRC"/os/fonts/selawik/*.ttf "$R/usr/local/share/fonts/selawik/"
 ch fc-cache -f > /dev/null 2>&1 || true
@@ -288,6 +318,13 @@ if [ "$TARGET" = starlte ]; then
 		ch systemctl enable "$u" > /dev/null 2>&1 || echo "(no $u)"
 	done
 fi
+if [ "$TARGET" = m20lte ]; then
+	# systemd-networkd runs the USB link's DHCP server (10-zboot-usb.network;
+	# NetworkManager leaves usb0 alone), so the computer gets 172.16.42.2
+	for u in zboot-usb-gadget zboot-firstboot zboot-hold systemd-networkd; do
+		ch systemctl enable "$u" > /dev/null 2>&1 || echo "(no $u)"
+	done
+fi
 if [ "$TARGET" = qemu ]; then
 	cat > "$R/etc/fstab" <<'FSTAB'
 # ztOS in QEMU
@@ -313,7 +350,7 @@ date -u +%Y-%m-%dT%H:%MZ >> "$R/etc/ztos/built"
 step "writing the system image"
 # Re-arm first boot even when building from a previously used root tree.
 # The image filesystem is smaller than the phone's USERDATA partition.
-if [ "$TARGET" = starlte ]; then
+if [ "$TARGET" = starlte ] || [ "$TARGET" = m20lte ]; then
 	touch "$R/etc/zboot-firstboot"
 fi
 umount -l "$R/var/cache/pacman/pkg" 2>/dev/null || true
@@ -337,7 +374,7 @@ def run_stage(s: Settings, log: Path) -> None:
         "TARGET": s.target, "PACKAGES": " ".join(packages(s.target)), "USERNAME": s.user,
         "PASSWORD": s.password, "HOSTNAME": s.hostname, "TIMEZONE": s.timezone, "FRESH": "1" if s.fresh else "0",
         "ROOTIMG": str(s.dir / "root.img"), "SIZE": str(s.size_gb), "MKE2FS": mke2fs,
-        "LABEL": "ZR_ARCH" if s.target == "starlte" else "ztos-root",
+        "LABEL": "ZR_ARCH" if s.target in PHONES else "ztos-root",
         "PKGCACHE": str(PKGCACHE),
         "PATH": os.environ.get("PATH", "/usr/bin"),
     }

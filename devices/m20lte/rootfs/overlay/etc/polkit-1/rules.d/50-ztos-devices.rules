@@ -1,0 +1,17 @@
+// Devices and Services (ztdevices), Galaxy M20: the phone's owner may start,
+// stop and restart ztOS's own services from the app without a password. Only
+// these units, only from the active session on the phone itself (not over
+// SSH), and only members of wheel. The S9's list, less the S9's hardware.
+var ztosUnits = [
+	"ztoscoresensorframework.service", "NetworkManager.service",
+	"ztos-pstore-keep.service", "zboot-usb-gadget.service",
+	"ztos-update-check.timer", "sshd.service"
+];
+polkit.addRule(function(action, subject) {
+	if (action.id == "org.freedesktop.systemd1.manage-units" &&
+	    subject.local && subject.active && subject.isInGroup("wheel") &&
+	    ztosUnits.indexOf(action.lookup("unit")) >= 0 &&
+	    ["start", "stop", "restart"].indexOf(action.lookup("verb")) >= 0) {
+		return polkit.Result.YES;
+	}
+});

@@ -57,6 +57,16 @@ starts a window shaped like a phone (540×1110).
 The emulator has no modem, sensors or battery, so the phone-only parts of
 ztOS stay off there.
 
+## Installing on a Galaxy M20 (SM-M205, "m20lte")
+
+Experimental: the port has not booted on a phone yet. `installer/ztos guide
+--target m20lte` and [devices/m20lte/README.md](../devices/m20lte/README.md)
+say how it is installed (everything through TWRP) and what to look at first.
+
+```
+installer/ztos install --target m20lte
+```
+
 ## Installing on a Galaxy S9 (SM-G960, "starlte")
 
 > **Read the [known quirks](../README.md#known-quirks) first** (the modem and sensor hub sometimes need a pass through TWRP).

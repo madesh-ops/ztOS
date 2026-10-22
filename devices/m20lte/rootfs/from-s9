@@ -1,0 +1,18 @@
+# The S9's own system files (rootfs/overlay) that are not about the S9's
+# hardware, and that the M20 takes as they are. The build copies these, then
+# devices/m20lte/rootfs/overlay on top. Everything else in rootfs/overlay
+# (Cirrus audio, the sensor hub, the modem, the S9 panel, the MAX77705
+# charger, Bluetooth, CPU idle) is the S9's alone.
+etc/fstab
+etc/NetworkManager/conf.d/10-zboot.conf
+etc/systemd/logind.conf.d/10-zboot.conf
+etc/systemd/network/10-zboot-usb.network
+etc/systemd/pstore.conf.d/ztos.conf
+etc/systemd/sleep.conf.d/10-zboot.conf
+etc/systemd/system.conf.d/10-splash.conf
+etc/sysctl.d/20-quiet-console.conf
+etc/systemd/system/zboot-usb-gadget.service
+etc/systemd/system/zboot-firstboot.service
+etc/systemd/system/ztos-pstore-keep.service
+usr/local/sbin/zboot-usb-gadget
+usr/local/sbin/zboot-firstboot

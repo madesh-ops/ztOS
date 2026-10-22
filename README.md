@@ -6,6 +6,9 @@ ztOS is a phone operating system: the **ztMETRO** shell (Windows Phone 8.1's
 look and motion) on Arch Linux ARM and mainline Linux, with its own apps, an
 updater and an SDK for apps in Python and Qt. The ztMETRO Shell and its components are written in C, and accelerated with OpenGL. Currently its ported for a Samsung Galaxy
 S9 (starlte), and I am hoping to expand supports for more devices in the future :).
+A port to the Samsung Galaxy M20 (m20lte) is in bring-up: its kernel boots to
+ztOS's rescue shell over USB, and the system itself is not installed yet. See
+[devices/m20lte/README.md](devices/m20lte/README.md).
 
 > This ROM is in very much Alpha, The installer is not tested on real hardware, open a issue in this github repo if you have any issues with it
 
@@ -44,6 +47,7 @@ From a Galaxy S9 running ztOS (taken from the live display with `scripts/phone-g
 | `kernel/`, `initramfs/`, `scripts/` | the phone's boot image: mainline 7.1 with the Exynos 9810 drivers, the start-up program, flashing |
 | `audio/`, `modem/`, `sensors/`, `power/`, `leds/`, `haptics/`, `firmware/` | the phone's hardware support, as loadable kernel modules |
 | `rootfs/` | the phone's own system files (USB link, charger, fallbacks) |
+| `devices/m20lte/` | the Galaxy M20 port, all of it in one place: device tree, kernel changes, drivers, boot image, install scripts ([status](devices/m20lte/README.md)) |
 | `stock/` | the phone's stock firmware and its EFS backups: never modified |
 | `archive/` | everything else from bring-up (recordings, screenshots, logs); `archive/MANIFEST.txt` says where each came from |
 | `build/`, `out/` | build inputs and outputs (not in the repository) |

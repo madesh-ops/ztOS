@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Where ztOS goes: the QEMU emulator, or a Galaxy S9 (starlte)."""
+"""Where ztOS goes: the QEMU emulator, a Galaxy S9 (starlte) or a Galaxy M20 (m20lte)."""
 from __future__ import annotations
 
 import os
@@ -12,6 +12,8 @@ from pathlib import Path
 
 from .build import EDK2, ROOT, WORK, Fail, say
 
+
+NAMES = {"qemu": "the emulator", "starlte": "the Galaxy S9", "m20lte": "the Galaxy M20"}
 
 MANUAL_REBOOT = """To reboot the phone:
   - hold Power and Volume+, Volume- keys to reboot."""
@@ -214,3 +216,92 @@ def install_phone(root_image: Path, ask) -> None:
     say("")
     say("Hold Power and Volume+, Volume- keys to reboot.")
     say("done: ztOS starts on the phone (the first start takes a minute)")
+
+
+# --- the Galaxy M20 ----------------------------------------------------------------
+
+M20 = ROOT / "devices" / "m20lte"
+
+M20_GUIDE = """
+Installing ztOS on a Samsung Galaxy M20 (SM-M205F/G/FN, "m20lte")
+=================================================================
+
+THIS PORT IS IN BRING-UP: it has not started on a phone yet. Expect the
+first attempts to stop at a black screen or the Samsung logo; the phone then
+comes back to TWRP by itself (or after Volume Up + Power), and nothing is lost
+that the backup does not hold. devices/m20lte/README.md says what works,
+what to try first and what to send back.
+
+ztOS replaces Android on the phone's internal storage. Everything on the
+phone's user data partition is ERASED. The phone's identity (IMEI, modem
+calibration: EFS and CPEFS) is never touched, and is saved first anyway.
+
+You need
+  - TWRP for m20lte in the phone's RECOVERY partition (unlock the bootloader:
+    Settings > Developer options > OEM unlocking, then flash TWRP with Odin or
+    Heimdall from download mode: Volume Up + Volume Down with the cable in).
+  - adb on this computer (android-tools) and a USB cable.
+  - The phone charged above 50 %.
+
+Steps (the installer does 3 to 7 for you, and asks before each)
+  1. Back up anything on the phone you want to keep. It will be gone.
+  2. Start TWRP: power the phone off, then hold Volume Up + Power until the
+     TWRP screen. Plug it into this computer.
+  3. BOOT, RECOVERY, EFS and CPEFS are saved to stock/m20lte/ (once).
+  4. ztOS's boot image is built: mainline 7.1 with the M20's device tree, the
+     start-up program, made fail-safe (a crash or reset lands in TWRP).
+  5. The system is written to USERDATA from TWRP, in 256 MiB pieces, each
+     checked; a cut cable just means running it again: it carries on.
+  6. The boot image is written to BOOT, and read back to check it.
+  7. Reboot from TWRP. The first start takes a minute: the system grows to
+     fill the storage, then the Welcome app shows how ztOS is used.
+
+To go back to Android: in TWRP, write stock/m20lte/BOOT.img back to BOOT
+(devices/m20lte/scripts/flash.sh BOOT stock/m20lte/BOOT.img) and flash the
+stock firmware with Odin.
+"""
+
+
+def guide(target: str) -> str:
+    return M20_GUIDE if target == "m20lte" else PHONE_GUIDE
+
+
+def install(target: str, root_image: Path, ask) -> None:
+    if target == "m20lte":
+        install_m20lte(root_image, ask)
+    else:
+        install_phone(root_image, ask)
+
+
+def install_m20lte(root_image: Path, ask) -> None:
+    """Steps 3 to 7 of M20_GUIDE. Everything goes through TWRP, so installing
+    never depends on the new kernel's USB working; nothing is written to the
+    phone without a yes, and the erasing step wants the word typed out."""
+    state = adb_state()
+    if state != "recovery":
+        raise Fail(f"the phone is not in TWRP over adb (adb says: {state}). Start TWRP (Volume Up + Power) and "
+                   "plug it in, then run this again.")
+    scripts = M20 / "scripts"
+    say("saving the phone's stock BOOT, RECOVERY, EFS and CPEFS (once)")
+    subprocess.run(["bash", str(scripts / "backup.sh")], check=True)
+    boot = ROOT / "out" / "ztos-m20lte-boot.img"
+    if not boot.exists() or ask("Build ztOS's boot image again? (no: use the one already built)"):
+        ram = "4" if ask("Is this a 4 GB Galaxy M20? (no: 3 GB, which is also the safe answer if unsure)",
+                         default=False) else "3"
+        say(f"building the boot image (kernel, device tree for {ram} GB, start-up program)")
+        subprocess.run(["bash", str(scripts / "build-boot.sh"), "ztos-m20lte-boot", "--fallback", "recovery",
+                        "--ram", ram], check=True)
+    print("\nNext: the system goes into USERDATA. EVERYTHING ON THE PHONE'S USER DATA IS ERASED.")
+    if input("Type ERASE to go on: ").strip() != "ERASE":
+        raise Fail("stopped before writing anything")
+    subprocess.run(["bash", str(scripts / "flash-root.sh"), str(root_image)], check=True)
+    if not ask("Write ztOS's boot image to the phone's BOOT partition now?"):
+        raise Fail("stopped: the system is in USERDATA, BOOT is still Android's (which will not start "
+                   "without its data; write ztOS's boot image, or restore the stock firmware)")
+    subprocess.run(["bash", str(scripts / "flash.sh"), "BOOT", str(boot)], check=True)
+    if ask("Reboot the phone into ztOS now?"):
+        subprocess.run(["adb", "reboot"], check=False)
+    say("")
+    say("done: ztOS starts on the phone (the first start takes a minute).")
+    say("If the screen stays black or on the logo for more than 10 minutes, the phone resets into TWRP by "
+        "itself; devices/m20lte/README.md says what to collect from there.")

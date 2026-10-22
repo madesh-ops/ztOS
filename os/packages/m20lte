@@ -1,0 +1,18 @@
+# ztOS on the Galaxy M20 (m20lte): the kernel is ztOS's own boot image, not a
+# package (see devices/m20lte/scripts/build-boot.sh).
+# for looking at the M20's I2C devices (backlight, gauge, touch) during bring-up
+i2c-tools
+# GNOME's adaptive (libadwaita) apps: they fit a phone's width. Music and
+# podcast players wait for sound; KDE's mobile apps would add a second
+# toolkit (Qt and its web engine). They draw in software for now
+# (GSK_RENDERER=cairo in os/overlay-m20lte/etc/ztos/session.env).
+gnome-calculator
+gnome-clocks
+gnome-weather
+gnome-calendar
+gnome-maps
+gnome-text-editor
+loupe
+foliate
+celluloid
+newsflash

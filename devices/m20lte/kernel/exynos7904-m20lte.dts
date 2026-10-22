@@ -1,0 +1,520 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Samsung Galaxy M20 (m20lte, SM-M205F/G/FN) device tree, for ztOS.
+ *
+ * The Exynos 7904 is the Exynos 7885 die (two A73 + six A53, Mali-G71 MP2),
+ * so this builds on mainline's exynos7885.dtsi, the same base as the Galaxy
+ * A8 2018 (exynos7885-jackpotlte.dts). Every address, pin and interrupt that
+ * is not in mainline was taken from Samsung's own M20 kernel
+ * (exynos7904-m20lte_common.dtsi, exynos7885.dtsi, display-lcd_m20_common.dtsi
+ * in LineageOS/android_kernel_samsung_universal7904); each node says where.
+ *
+ * NOTHING HERE HAS RUN ON A PHONE YET. devices/m20lte/README.md lists what to
+ * check first and in which order.
+ *
+ * Generated variants (memory size, fallback target) are made from this file
+ * by devices/m20lte/kernel/make-dts.py; edit this file, not the output.
+ */
+
+/dts-v1/;
+#include "exynos7885.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/soc/samsung,exynos-usi.h>
+
+/ {
+	model = "Samsung Galaxy M20";
+	compatible = "samsung,m20lte", "samsung,exynos7885";
+	chassis-type = "handset";
+
+	aliases {
+		mmc0 = &mmc_0;
+		serial2 = &serial_2;
+	};
+
+	/*
+	 * The GPU's clock (CMU_G3D's G3D PLL) is set through ACPM in the M20
+	 * kernel and has no mainline driver; the bootloader leaves it running.
+	 * Panfrost needs a clock to enable: this one only names it, at the
+	 * stock kernel's minimum and DVFS start (gpu_min_clock, 343 MHz).
+	 */
+	gpu_clk: clock-g3d {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <343000000>;
+		clock-output-names = "g3d_bootloader";
+	};
+
+	chosen {
+		#address-cells = <2>;
+		#size-cells = <1>;
+		ranges;
+
+		/*
+		 * The bootloader's framebuffer: sboot leaves the panel on and
+		 * scanning this out, and uniLoader (board-m20lte.c) switches
+		 * DECON to software trigger so writes reach the glass. simpledrm
+		 * takes it over as /dev/dri/card0. 1080 x 2340, 4 bytes a pixel.
+		 */
+		framebuffer@ec000000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xec000000 0x9a3f80>;
+			width = <1080>;
+			height = <2340>;
+			stride = <(1080 * 4)>;
+			/* x, not a: the shell's frames are XRGB8888, and a matching
+			 * format makes simpledrm's copy a plain memcpy; converting
+			 * every pixel to ARGB8888 made it slower than the scanout */
+			format = "x8r8g8b8";
+			/* The line the panel is scanning: DSIM LINK0 (0x14870008)
+			 * bits 12:0, 0..2339 at 60 Hz, 7.12 us a line. simpledrm
+			 * copies each frame in just ahead of it (patch-kernel.py),
+			 * which keeps the GPU's frames from tearing. */
+			zerone,scanout-line = <0x14870008 0x1fff 2340 7120>;
+		};
+	};
+
+	/* ZTOS-MEMORY: rewritten by make-dts.py --ram 3|4 */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x3da00000>,
+		      <0x0 0xc0000000 0x40000000>,
+		      <0x8 0x80000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <1>;
+		ranges;
+
+		/*
+		 * Everything below is the stock device tree's own reserved
+		 * memory, read out of the DTBH section of the M20's stock BOOT
+		 * image (M205FDDU8CUI1). Nothing of ours runs in these, but
+		 * the secure world (TIMA, sec_debug) and the firmware of the
+		 * modem, GNSS, Wi-Fi and audio DSP were given them by sboot,
+		 * so the kernel must not hand them out.
+		 */
+		framebuffer@ec000000 {
+			reg = <0x0 0xec000000 0x1400000>;
+			no-map;
+		};
+
+		sec_debug_magic@80000000 {
+			reg = <0x0 0x80000000 0x1000>;
+			no-map;
+		};
+
+		dram_test@80002000 {
+			reg = <0x0 0x80002000 0x2000>;
+			no-map;
+		};
+
+		tima_region@b8000000 {
+			reg = <0x0 0xb8000000 0x200000>;
+			no-map;
+		};
+
+		seclog_mem@c0000000 {
+			reg = <0x0 0xc0000000 0x80000>;
+			no-map;
+		};
+
+		wlbt_mem: wifibt_if@e9000000 {
+			reg = <0x0 0xe9000000 0x400000>;
+			no-map;
+		};
+
+		abox_rmem@e9400000 {
+			reg = <0x0 0xe9400000 0x400000>;
+			no-map;
+		};
+
+		modem_if@f5400000 {
+			reg = <0x0 0xf5400000 0x8800000>;
+			no-map;
+		};
+
+		cp_ram_logging@fdc00000 {
+			reg = <0x0 0xfdc00000 0x2000000>;
+			no-map;
+		};
+
+		gnss_if@ffc00000 {
+			reg = <0x0 0xffc00000 0x400000>;
+			no-map;
+		};
+
+		/*
+		 * The kernel log of a crash, kept across the reset (pstore).
+		 * In the gap between the audio DSP's region and the
+		 * framebuffer, which the stock tree leaves unreserved.
+		 */
+		ramoops@eb800000 {
+			compatible = "ramoops";
+			reg = <0x0 0xeb800000 0x200000>;
+			record-size = <0x40000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x0>;
+			ecc-size = <0>;
+		};
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&key_volup &key_voldown &key_power>;
+
+		volup-key {
+			label = "Volume Up";
+			linux,code = <KEY_VOLUMEUP>;
+			gpios = <&gpa1 5 GPIO_ACTIVE_LOW>;
+		};
+
+		voldown-key {
+			label = "Volume Down";
+			linux,code = <KEY_VOLUMEDOWN>;
+			gpios = <&gpa1 6 GPIO_ACTIVE_LOW>;
+		};
+
+		power-key {
+			label = "Power";
+			linux,code = <KEY_POWER>;
+			gpios = <&gpa1 7 GPIO_ACTIVE_LOW>;
+			wakeup-source;
+		};
+	};
+
+	/*
+	 * The vibration motor: an LDO switched by GPP0[3]
+	 * (exynos7904-m20lte_motor.dtsi: sec_vib,ldo_en). gpio-vibrator gives
+	 * ztMETRO the FF_RUMBLE input device it already drives.
+	 */
+	vibrator {
+		compatible = "gpio-vibrator";
+		enable-gpios = <&gpp0 3 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&motor_en>;
+	};
+
+	/*
+	 * USI0 is two high-speed I2C channels (USI_MODE "hsi2c0_hsi2c1" in the
+	 * M20 kernel); the mode lives in SYSREG_PERI at 0x10032000 (usi.c).
+	 */
+	sysreg_usi: syscon@10032000 {
+		compatible = "syscon";
+		reg = <0x0 0x10032000 0x10>;
+	};
+};
+
+&soc {
+	/* USB: DWC3 at 0x13600000, its PHY at 0x135d0000 (exynos7885.dtsi in
+	 * the M20 kernel). The PHY's registers are the "usb3p1" layout that
+	 * mainline drives as the Exynos 850's; only the PMU isolation offset
+	 * differs (0x674), so it has its own compatible, added by
+	 * devices/m20lte/kernel/patch-kernel.py. */
+	usbdrd: usb@13600000 {
+		compatible = "samsung,exynos850-dwusb3";
+		ranges = <0x0 0x13600000 0x10000>;
+		clocks = <&cmu_fsys CLK_FSYS_USB30DRD_BUS_CLK_EARLY>,
+			 <&cmu_fsys CLK_FSYS_USB30DRD_REF_CLK>;
+		clock-names = "bus_early", "ref";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		usbdrd_dwc3: usb@0 {
+			compatible = "snps,dwc3";
+			reg = <0x0 0x10000>;
+			interrupts = <GIC_SPI 135 IRQ_TYPE_LEVEL_HIGH>;
+			phys = <&usbdrd_phy 0>;
+			phy-names = "usb2-phy";
+			/* the rescue shell and the install are a USB gadget;
+			 * the S2MU004 that would say host or device has no
+			 * mainline driver */
+			dr_mode = "peripheral";
+			maximum-speed = "high-speed";
+			snps,quirk-frame-length-adjustment = <0x20>;
+			/*
+			 * As Samsung's kernel runs it (its GUSB2PHYCFG reads
+			 * 0x40102400 and GUSB3PIPECTL 0x110c0002 with adb
+			 * working): the PHYs are never suspended by the
+			 * controller, and no receiver detection in P3. With
+			 * mainline's defaults the host could not read the
+			 * phone's descriptors.
+			 */
+			snps,dis_u2_susphy_quirk;
+			snps,dis_enblslpm_quirk;
+			snps,dis_u3_susphy_quirk;
+			snps,dis_rxdet_inp3_quirk;
+		};
+	};
+
+	usbdrd_phy: phy@135d0000 {
+		compatible = "samsung,exynos7885-usbdrd-phy";
+		reg = <0x135d0000 0x100>;
+		/* "ref" is the 50 MHz USB PLL: phy_refsel_clockcore in the M20
+		 * kernel. phy30_0/1 gate the PHY controller's registers: without
+		 * them every register reads 0 (the first boots). */
+		clocks = <&cmu_fsys CLK_FSYS_USB30DRD_ACLK_20PHYCTRL>,
+			 <&cmu_fsys CLK_FSYS_USB30DRD_ACLK_30PHYCTRL_0>,
+			 <&cmu_fsys CLK_FSYS_USB30DRD_ACLK_30PHYCTRL_1>,
+			 <&cmu_fsys CLK_FSYS_USB20PHY_CLKCORE>;
+		clock-names = "phy", "phy30_0", "phy30_1", "ref";
+		/*
+		 * The USB 2.0 PHY has no frequency select of its own: it expects
+		 * 50 MHz from PLL_USB (Samsung's kernel: "CLKCORE <- PLL_USB,
+		 * 50000000"). Left alone, PLL_USB stays off and its mux passes the
+		 * 26 MHz oscillator through, the PHY's 480 MHz runs at half speed
+		 * and the host can't read a single descriptor (seen on the phone:
+		 * PLL_CON0_PLL_USB = 0).
+		 */
+		assigned-clocks = <&cmu_fsys CLK_FOUT_USB_PLL>,
+				  <&cmu_fsys CLK_MOUT_USB_PLL>;
+		assigned-clock-parents = <0>, <&cmu_fsys CLK_FOUT_USB_PLL>;
+		assigned-clock-rates = <50000000>, <0>;
+		samsung,pmu-syscon = <&pmu_system_controller>;
+		#phy-cells = <1>;
+	};
+
+	usi0: usi@13920000 {
+		compatible = "samsung,exynos8895-usi";
+		ranges = <0x0 0x13920000 0x20000>;
+		clocks = <&cmu_peri CLK_GOUT_USI0_PCLK>,
+			 <&cmu_peri CLK_GOUT_USI0_SCLK>;
+		clock-names = "pclk", "ipclk";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		samsung,sysreg = <&sysreg_usi 0x0>;
+		samsung,mode = <USI_MODE_I2C0_1>;
+
+		/* hsi2c_5 in the M20 kernel: the touch controller */
+		hsi2c_5: i2c@10000 {
+			compatible = "samsung,exynos7-hsi2c";
+			reg = <0x10000 0x1000>;
+			interrupts = <GIC_SPI 268 IRQ_TYPE_LEVEL_HIGH>;
+			/* the I2C timing comes from this clock's rate: USI0's own
+			 * (its bus clock is held on by the USI node) */
+			clocks = <&cmu_peri CLK_GOUT_USI0_SCLK>;
+			clock-names = "hsi2c";
+			clock-frequency = <400000>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&hs_i2c5_bus>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/*
+			 * Himax HX83112A, in-cell with the panel
+			 * (himax,fw-path "hx83112a_m20lte.fw"). Mainline's
+			 * himax_hx83112b driver, taught the A's product id by
+			 * patch-kernel.py. ZTOS-TOUCH: make-dts.py --no-touch
+			 * turns it off.
+			 */
+			touchscreen@48 {
+				compatible = "himax,hx83112a";
+				reg = <0x48>;
+				interrupt-parent = <&gpa0>;
+				interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
+				/* TSP_RST: the driver clears the firmware's stop
+				 * request, pulses this, then writes the HSEN flag
+				 * that starts scanning (patch-kernel.py) */
+				reset-gpios = <&gpg2 1 GPIO_ACTIVE_LOW>;
+				touchscreen-size-x = <1080>;
+				touchscreen-size-y = <2340>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&touch_irq>;
+			};
+		};
+	};
+
+	/* Mali-G71 MP2 (GPU_ID 0x60a00002, r0p0): mali@11500000 in the M20
+	 * kernel's exynos7885-mali_common.dtsi, with its JOB, MMU and GPU
+	 * interrupts. Its power domain (PMU 0x11c840a0) and its clock are on
+	 * from the bootloader and have no mainline driver yet: the power
+	 * domain is not described, the clock is gpu_clk above, and Panfrost
+	 * runs the GPU at whatever rate it was left at. */
+	gpu: gpu@11500000 {
+		compatible = "arm,mali-bifrost";
+		reg = <0x11500000 0x5000>;
+		interrupts = <GIC_SPI 159 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "job", "mmu", "gpu";
+		clocks = <&gpu_clk>;
+	};
+
+	/* The Wi-Fi/BT subsystem (Samsung SCSC "Maxwell", S612): scsc_wifibt in
+	 * the M20 kernel's exynos7885.dtsi, with its R4 and M4 mailboxes and the
+	 * MBOX (SPI 57) and WDOG (SPI 286) interrupts; it boots from wlbt_mem.
+	 * devices/m20lte/drivers/zrn-wlbt.c only boots the firmware, on request. */
+	wlbt: wlbt@120c0000 {
+		compatible = "zerone,m20-wlbt";
+		reg = <0x120c0000 0x180>,
+		      <0x120e0000 0x180>;
+		interrupts = <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 286 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "mbox", "wdog";
+		samsung,syscon-phandle = <&pmu_system_controller>;
+		memory-region = <&wlbt_mem>;
+	};
+
+	/* ZTOS-WATCHDOG: WDT at 0x10060000, A53 cluster: PMU 0x408/0x40c
+	 * bit 24 (drv_data_exynos8 in the M20 kernel's s3c2410_wdt.c).
+	 * Off unless make-dts.py --watchdog. */
+	watchdog: watchdog@10060000 {
+		compatible = "samsung,exynos7885-wdt";
+		reg = <0x10060000 0x100>;
+		interrupts = <GIC_SPI 233 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cmu_peri CLK_GOUT_WDT1_PCLK>, <&oscclk>;
+		clock-names = "watchdog", "watchdog_src";
+		samsung,syscon-phandle = <&pmu_system_controller>;
+		status = "disabled";
+	};
+};
+
+&usbdrd {
+	status = "okay";
+};
+
+&pmu_system_controller {
+	/*
+	 * Samsung's boot-mode magic, as on the S9: INFORM3 (PMU + 0x80c) tells
+	 * sboot where to go after a reset (sec_reboot.c in the M20 kernel).
+	 * exynos-pmu populates its children, so `reboot recovery` lands in TWRP.
+	 */
+	reboot-mode {
+		compatible = "syscon-reboot-mode";
+		offset = <0x80c>;
+		mode-normal = <0x12345670>;
+		mode-download = <0x12345671>;
+		mode-recovery = <0x12345674>;
+		mode-bootloader = <0x1234567d>;
+	};
+};
+
+&mmc_0 {
+	/* the eMMC: same settings as the A8 2018 (same SoC, same controller) */
+	mmc-hs200-1_8v;
+	mmc-hs400-1_8v;
+	cap-mmc-highspeed;
+	non-removable;
+	mmc-hs400-enhanced-strobe;
+	card-detect-delay = <200>;
+	clock-frequency = <800000000>;
+	bus-width = <8>;
+	samsung,dw-mshc-ciu-div = <3>;
+	samsung,dw-mshc-sdr-timing = <0 4>;
+	samsung,dw-mshc-ddr-timing = <2 4>;
+	samsung,dw-mshc-hs400-timing = <0 2>;
+
+	pinctrl-names = "default";
+	pinctrl-0 = <&sd0_clk_fast_slew_rate_3x &sd0_cmd &sd0_rdqs
+		     &sd0_bus1 &sd0_bus4 &sd0_bus8>;
+
+	status = "okay";
+};
+
+&oscclk {
+	clock-frequency = <26000000>;
+};
+
+&serial_2 {
+	/* the debug UART (through the earphone jack with a Samsung UART
+	 * cable); console=ttySAC2,115200 on the command line uses it */
+	status = "okay";
+};
+
+/* i2c_0: the S2MU004 fuel gauge (battery_data_m20lte_common.dtsi) */
+&i2c_0 {
+	status = "okay";
+
+	/* devices/m20lte/drivers/zrn-s2mu004-fg.c: read-only, no charger */
+	fuel-gauge@3b {
+		compatible = "zerone,s2mu004-fuelgauge";
+		reg = <0x3b>;
+	};
+};
+
+/* i2c_4: the TI LM3632 backlight and display bias
+ * (display-lcd_m20_common.dtsi) */
+&i2c_4 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	/* devices/m20lte/drivers/zrn-lm3632-bl.c: the brightness code only,
+	 * never the bias rails the panel runs on */
+	backlight@11 {
+		compatible = "zerone,lm3632-backlight";
+		reg = <0x11>;
+	};
+};
+
+/* i2c_3: the NXP TFA9896 speaker amplifier at 0x34 (revision 0x1b96), fed by
+ * ABOX's UAIF3 (tfa98xx in exynos7904-m20lte_common.dtsi). tfa989x drives it
+ * with its DSP bypassed (the 9896 added in kernel/patch-kernel.py); it binds
+ * once the kernel has sound, which waits for an ABOX driver. */
+&i2c_3 {
+	status = "okay";
+	clock-frequency = <400000>;
+
+	speaker_amp: audio-codec@34 {
+		compatible = "nxp,tfa9896";
+		reg = <0x34>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Speaker";
+	};
+};
+
+/* i2c_6: the motion sensors (exynos7904-m20lte-sensor-r03.dtsi). The
+ * board has an LSM6DSL or a LIS2DS depending on the batch; st_lsm6dsx reads
+ * the WHO_AM_I and leaves a missing chip alone. */
+&i2c_6 {
+	status = "okay";
+
+	imu@6b {
+		compatible = "st,lsm6dsl";
+		reg = <0x6b>;
+		interrupt-parent = <&gpa0>;
+		interrupts = <3 IRQ_TYPE_LEVEL_HIGH>;
+	};
+};
+
+&pinctrl_alive {
+	key_volup: key-volup-pins {
+		samsung,pins = "gpa1-5";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_F>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+	};
+
+	key_voldown: key-voldown-pins {
+		samsung,pins = "gpa1-6";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_F>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+	};
+
+	key_power: key-power-pins {
+		samsung,pins = "gpa1-7";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_F>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+	};
+
+	/* the touch controller's attention line (himax,irq-gpio) */
+	touch_irq: touch-irq-pins {
+		samsung,pins = "gpa0-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+	};
+};
+
+&pinctrl_top {
+	motor_en: motor-en-pins {
+		samsung,pins = "gpp0-3";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <EXYNOS5420_PIN_DRV_LV1>;
+	};
+};

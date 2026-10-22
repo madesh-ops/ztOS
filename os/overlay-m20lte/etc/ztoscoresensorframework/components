@@ -1,0 +1,6 @@
+# ztOSCoreSensorFramework (Galaxy M20): what this port brings so far. Keys,
+# touch, the vibration motor and the motion sensor are mainline drivers built
+# into the kernel, and have nothing to watch. See devices/m20lte/README.md.
+module|zrn_lm3632_bl|zrn-lm3632-bl|Backlight
+module|zrn_s2mu004_fg|zrn-s2mu004-fg|Battery gauge
+session|ztapps||App list

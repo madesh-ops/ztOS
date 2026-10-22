@@ -1,0 +1,4 @@
+# the M20's backlight (devices/m20lte/drivers/zrn-lm3632-bl.c): the shell, in
+# group video, sets it; without this it is root's alone and the screen stays
+# at the bootloader's brightness
+ACTION=="add", SUBSYSTEM=="backlight", KERNEL=="lm3632-bl", RUN+="/usr/bin/chgrp video /sys%p/brightness", RUN+="/usr/bin/chmod g+w /sys%p/brightness"

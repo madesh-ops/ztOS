@@ -11,8 +11,10 @@ mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409" \
 echo 0x1d6b > "$g/idVendor"
 echo 0x0104 > "$g/idProduct"
 echo "zboot" > "$g/strings/0x409/manufacturer"
-echo "Galaxy S9 Arch Linux ARM" > "$g/strings/0x409/product"
-echo "starlte" > "$g/strings/0x409/serialnumber"
+model=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)
+device=$(tr '\0' '\n' < /proc/device-tree/compatible 2>/dev/null | head -n1 | cut -d, -f2)
+echo "${model:-phone} ztOS" > "$g/strings/0x409/product"
+echo "${device:-ztos}" > "$g/strings/0x409/serialnumber"
 echo "ncm+acm" > "$g/configs/c.1/strings/0x409/configuration"
 echo 02:5a:42:00:00:01 > "$g/functions/ncm.usb0/dev_addr"
 echo 02:5a:42:00:00:02 > "$g/functions/ncm.usb0/host_addr"

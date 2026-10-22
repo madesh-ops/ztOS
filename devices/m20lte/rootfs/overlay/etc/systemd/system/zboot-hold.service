@@ -1,0 +1,16 @@
+[Unit]
+Description=Disarm the boot stage's deadman once the session is up
+# On the S9, zboot-usb-gadget.service does this: USB up means the phone can
+# be reached. On the M20 the USB gadget is still unproven, and a ztOS that
+# starts its session but has no USB must not be reset into TWRP every ten
+# minutes. A boot that never gets this far still resets.
+After=greetd.service
+Requires=greetd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/touch /run/zboot.hold
+
+[Install]
+WantedBy=graphical.target multi-user.target

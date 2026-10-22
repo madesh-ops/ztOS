@@ -1,0 +1,2 @@
+# The USB internet proxy (/etc/environment) for commands run with sudo, pacman above all
+Defaults env_keep += "all_proxy ALL_PROXY no_proxy"

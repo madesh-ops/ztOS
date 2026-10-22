@@ -80,6 +80,8 @@ def decompress_image(src: Path, dst: Path) -> Path:
 def get_prebuilt(target: str) -> tuple[Path, Path | None]:
     """Downloads and prepares prebuilt images for target ('starlte' or 'qemu').
     Returns (root_image, boot_image_or_None)."""
+    if target == "m20lte":
+        raise Fail("there are no prebuilt images for the Galaxy M20 yet: it is built on this PC")
     info = fetch_release_info()
     tag = info.get("tag_name", "latest")
     say(f"found ztOS release: {tag}")
