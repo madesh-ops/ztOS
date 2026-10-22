@@ -5365,9 +5365,11 @@ static void *orient_thread(void *data) {
 			int now = held;
 			/* lying nearly flat, or upside down: as it was */
 			if (g > 0 && upright > 0.5f * g) {
+				/* tried on the M20: x reads positive with the right
+				 * side down */
 				float deg = atan2f(v[0], v[1]) * 180.0f / (float)M_PI;
-				now = fabsf(deg) < 30 ? 0 : deg > 60 && deg < 120 ? 1 :
-					deg < -60 && deg > -120 ? 3 : held;
+				now = fabsf(deg) < 30 ? 0 : deg > 60 && deg < 120 ? 3 :
+					deg < -60 && deg > -120 ? 1 : held;
 			}
 			if (now != held) {
 				held = now;
