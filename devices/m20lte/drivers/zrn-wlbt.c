@@ -620,11 +620,44 @@ static irqreturn_t zrn_wlbt_wdog_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * platform_mif_pmu_reset(): into reset (case 2, a stop), or powered off
+ * (case 1, for one a previous kernel left running), and the window unmapped
+ */
+static int wlbt_pmu_reset(struct zrn_wlbt *w, bool power_off)
+{
+	u32 val;
+	int ret;
+
+	regmap_update_bits(w->pmu, RESET_AHEAD_WIFI, 0x3, 0);
+	regmap_update_bits(w->pmu, CLEANY_BUS_WIFI, 0x1, 0);
+	regmap_update_bits(w->pmu, LOGIC_RESET_WIFI, 0x3, 0);
+	regmap_update_bits(w->pmu, TCXO_GATE_WIFI, 0x1, 0);
+	regmap_update_bits(w->pmu, WIFI_DISABLE_ISO, 0x1, 1);
+	regmap_update_bits(w->pmu, WIFI_RESET_ISO, 0x1, 0);
+	regmap_update_bits(w->pmu, CENTRAL_SEQ_WIFI_CFG, BIT(16), 0);
+	if (power_off)
+		regmap_update_bits(w->pmu, WIFI_CTRL_NS, WIFI_PWRON, 0);
+	else
+		regmap_update_bits(w->pmu, WIFI_CTRL_NS, WIFI_RESET_SET, WIFI_RESET_SET);
+
+	ret = regmap_read_poll_timeout(w->pmu, CENTRAL_SEQ_WIFI_STATUS, val,
+				       FIELD_GET(SEQ_STATES, val) == SEQ_IN_RESET,
+				       1000, 500000);
+	if (ret)
+		dev_err(w->dev, "the sequencer did not reach reset: status %#x\n", val);
+
+	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG0, 0);
+	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG1, 0);
+	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG2, 0);
+	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG3, 0);
+	return ret;
+}
+
 /* Back into reset, as platform_mif_pmu_reset(.., 2) and platform_mif_reset(.., 1) */
 static int zrn_wlbt_stop(struct zrn_wlbt *w)
 {
 	u8 halt[MGMT_PACKET] = { MGMT_CHAN_MAXWELL, MM_HALT_REQ };
-	u32 val;
 	int ret;
 
 	/* ask a started firmware to park first (send_mm_msg_stop_blocking()); older ones never answer */
@@ -639,28 +672,43 @@ static int zrn_wlbt_stop(struct zrn_wlbt *w)
 	disable_irq(w->wdog_irq);
 	mbox_reset(w);
 
-	regmap_update_bits(w->pmu, RESET_AHEAD_WIFI, 0x3, 0);
-	regmap_update_bits(w->pmu, CLEANY_BUS_WIFI, 0x1, 0);
-	regmap_update_bits(w->pmu, LOGIC_RESET_WIFI, 0x3, 0);
-	regmap_update_bits(w->pmu, TCXO_GATE_WIFI, 0x1, 0);
-	regmap_update_bits(w->pmu, WIFI_DISABLE_ISO, 0x1, 1);
-	regmap_update_bits(w->pmu, WIFI_RESET_ISO, 0x1, 0);
-	regmap_update_bits(w->pmu, CENTRAL_SEQ_WIFI_CFG, BIT(16), 0);
-	regmap_update_bits(w->pmu, WIFI_CTRL_NS, WIFI_RESET_SET, WIFI_RESET_SET);
-
-	ret = regmap_read_poll_timeout(w->pmu, CENTRAL_SEQ_WIFI_STATUS, val,
-				       FIELD_GET(SEQ_STATES, val) == SEQ_IN_RESET,
-				       1000, 500000);
-	if (ret)
-		dev_err(w->dev, "the sequencer did not reach reset: status %#x\n", val);
-
-	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG0, 0);
-	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG1, 0);
-	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG2, 0);
-	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG3, 0);
+	ret = wlbt_pmu_reset(w, false);
 	reinit_completion(&w->started);
 	WRITE_ONCE(w->fw_up, false);
 	return ret;
+}
+
+/*
+ * Samsung's exynos_acpm_set_flag(), right before reset release, through the
+ * patched ACPM driver (patch-kernel.py) if it is loaded: without it the
+ * firmware still boots, so it is optional.
+ */
+int acpm_exynos7885_wlbt_flag(void);
+
+/*
+ * Off by default: on the M20 the APM did not answer it on DVFS channel 0
+ * (timeout), and the connection after it failed its handshakes until a
+ * reboot. Kept for trying again: zrn_wlbt.acpm_flag=1.
+ */
+static bool acpm_flag;
+module_param(acpm_flag, bool, 0644);
+MODULE_PARM_DESC(acpm_flag, "send Samsung's ACPM WLBT flag before reset release (experimental)");
+
+static void wlbt_acpm_flag(struct zrn_wlbt *w)
+{
+	int (*flag)(void);
+	int ret;
+
+	if (!acpm_flag)
+		return;
+	flag = symbol_get(acpm_exynos7885_wlbt_flag);
+	if (!flag) {
+		dev_info(w->dev, "ACPM not loaded: no WLBT flag before reset release\n");
+		return;
+	}
+	ret = flag();
+	symbol_put(acpm_exynos7885_wlbt_flag);
+	dev_info(w->dev, "ACPM WLBT flag: %d\n", ret);
 }
 
 static int zrn_wlbt_boot(struct zrn_wlbt *w)
@@ -672,10 +720,23 @@ static int zrn_wlbt_boot(struct zrn_wlbt *w)
 	long left;
 	int ret, conf_off;
 
-	/* running already (powered and out of reset); a stop leaves it powered, in reset */
+	/*
+	 * Powered and out of reset: running. A stop leaves it powered, in
+	 * reset. One this driver did not start was left running by the kernel
+	 * before a warm reboot (the PMU keeps it): powered off first, as
+	 * platform_mif_pmu_reset() case 1 (holding it in reset does not reach
+	 * the sequencer's reset state from there).
+	 */
 	regmap_read(w->pmu, WIFI_CTRL_NS, &ctrl);
-	if ((ctrl & WIFI_PWRON) && !(ctrl & WIFI_RESET_SET))
-		return -EBUSY;
+	if ((ctrl & WIFI_PWRON) && !(ctrl & WIFI_RESET_SET)) {
+		if (w->running)
+			return -EBUSY;
+		dev_info(w->dev, "left running by the previous kernel: powering it off first\n");
+		mbox_reset(w);
+		ret = wlbt_pmu_reset(w, true);
+		if (ret)
+			return ret;
+	}
 
 	ret = request_firmware(&fw, FW_NAME, w->dev);
 	if (ret)
@@ -747,6 +808,7 @@ static int zrn_wlbt_boot(struct zrn_wlbt *w)
 	/* the second window (BT-ABOX shared memory): the M20 has none, as in Samsung's tree */
 	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG2, 0);
 	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG3, 0);
+	wlbt_acpm_flag(w);
 	regmap_update_bits(w->pmu, WIFI_CTRL_NS, WIFI_PWRON, WIFI_PWRON);
 	regmap_update_bits(w->pmu, WIFI_CTRL_NS, WIFI_RESET_SET, 0);
 	regmap_update_bits(w->pmu, WIFI_CTRL_S, WIFI_START, WIFI_START);
@@ -894,7 +956,7 @@ struct scsc_service *scsc_mx_service_open(struct scsc_mx *mx, enum scsc_service_
 {
 	struct zrn_wlbt *w = to_w(mx);
 	struct scsc_service *svc;
-	int ret = 0;
+	int ret = 0, tries;
 
 	svc = kzalloc(sizeof(*svc), GFP_KERNEL);
 	if (!svc) {
@@ -908,9 +970,19 @@ struct scsc_service *scsc_mx_service_open(struct scsc_mx *mx, enum scsc_service_
 	init_completion(&svc->stop_cfm);
 
 	mutex_lock(&w->lock);
-	if (!w->running) {
+	/*
+	 * A subsystem a previous kernel left running (a crash, a forced
+	 * restart) does not reach its reset state when powered off; it starts
+	 * on the third try (power off, a start that fails, its stop, a start),
+	 * so try that here instead of in the WLAN driver's 10 s retries.
+	 */
+	for (tries = 0; !w->running && tries < 3; tries++) {
 		ret = zrn_wlbt_boot(w);
 		w->booted_by_service = true;
+		if (!ret && READ_ONCE(w->fw_up))
+			break;
+		if (w->running)
+			zrn_wlbt_stop(w);
 	}
 	if (!ret && !READ_ONCE(w->fw_up))
 		ret = -EIO;		/* no MM_START_IND */
@@ -1337,6 +1409,17 @@ static void zrn_wlbt_remove(struct platform_device *pdev)
 	mutex_unlock(&w->lock);
 }
 
+/* Into reset for a reboot or power-off: the PMU keeps a running subsystem running */
+static void zrn_wlbt_shutdown(struct platform_device *pdev)
+{
+	struct zrn_wlbt *w = platform_get_drvdata(pdev);
+
+	mutex_lock(&w->lock);
+	if (w->running)
+		zrn_wlbt_stop(w);
+	mutex_unlock(&w->lock);
+}
+
 static const struct of_device_id zrn_wlbt_of_match[] = {
 	{ .compatible = "zerone,m20-wlbt" },
 	{ }
@@ -1351,6 +1434,7 @@ static struct platform_driver zrn_wlbt_driver = {
 	},
 	.probe = zrn_wlbt_probe,
 	.remove = zrn_wlbt_remove,
+	.shutdown = zrn_wlbt_shutdown,
 };
 module_platform_driver(zrn_wlbt_driver);
 

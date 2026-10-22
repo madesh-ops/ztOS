@@ -689,6 +689,40 @@ insert(ACPM, '"samsung,exynos7885-acpm-ipc"',
 		.data = &acpm_exynos7885,
 	},
 """)
+# Samsung's exynos_acpm_set_flag(), which its WLBT driver sends just before
+# the subsystem leaves reset: DVFS channel 0, { 7, 1, SET_FLAG (6), 0 }.
+# Exported for zrn-wlbt, which looks it up only if this module is loaded.
+insert(ACPM, "acpm_exynos7885_wlbt_flag",
+       "/**\n * acpm_setup_ops() -",
+       """static struct acpm_info *acpm_exynos7885_info;
+
+int acpm_exynos7885_wlbt_flag(void);	/* used by zrn-wlbt, through symbol_get() */
+
+/*
+ * Exynos 7885: what exynos_acpm_set_flag() does in Samsung's kernel right
+ * before WLBT leaves reset, so the APM sets the supply the subsystem needs.
+ */
+int acpm_exynos7885_wlbt_flag(void)
+{
+	u32 cmd[4] = { 7, 1, 6, 0 };
+	struct acpm_xfer xfer = {
+		.txd = cmd,
+		.rxd = cmd,
+		.txcnt = ARRAY_SIZE(cmd),
+		.rxcnt = ARRAY_SIZE(cmd),
+		.acpm_chan_id = 0,
+	};
+
+	if (!acpm_exynos7885_info)
+		return -ENODEV;
+	return acpm_do_xfer(&acpm_exynos7885_info->handle, &xfer);
+}
+EXPORT_SYMBOL_GPL(acpm_exynos7885_wlbt_flag);
+
+""", after=False)
+insert(ACPM, "acpm_exynos7885_info = acpm;",
+       "\tplatform_set_drvdata(pdev, acpm);\n",
+       "\tif (acpm->exynos7885)\n\t\tacpm_exynos7885_info = acpm;\n")
 replace(ACPM, "acpm_autoload",
         "MODULE_DEVICE_TABLE(of, acpm_match);",
         """/* gs101 only: the Exynos 7885 is loaded by hand while it is brought up */
