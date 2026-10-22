@@ -225,6 +225,7 @@ struct zrn_wlbt {
 	struct completion started, halted;
 	int mbox_irq, wdog_irq;		/* enabled only while running */
 	u32 rf_hw_ver;
+	bool fw_up;			/* MM_START_IND seen since the last reset release */
 	spinlock_t log_lock;
 	u32 log[MXLOG_KEEP];
 	unsigned int log_head, log_count;
@@ -516,6 +517,7 @@ static void mgmt_drain(struct zrn_wlbt *w)
 		else if (msg == MM_START_IND) {
 			w->rf_hw_ver = arg;
 			dev_info(w->dev, "firmware started (MM_START_IND), RF hardware version %#06x\n", arg);
+			WRITE_ONCE(w->fw_up, true);
 			complete(&w->started);
 		} else if (msg == MM_HALT_RSP) {
 			complete(&w->halted);
@@ -626,7 +628,7 @@ static int zrn_wlbt_stop(struct zrn_wlbt *w)
 	int ret;
 
 	/* ask a started firmware to park first (send_mm_msg_stop_blocking()); older ones never answer */
-	if (completion_done(&w->started)) {
+	if (READ_ONCE(w->fw_up)) {
 		reinit_completion(&w->halted);
 		if (!stream_push(w, &w->mgmt_out, halt) &&
 		    !wait_for_completion_timeout(&w->halted, msecs_to_jiffies(100)))
@@ -657,6 +659,7 @@ static int zrn_wlbt_stop(struct zrn_wlbt *w)
 	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG2, 0);
 	regmap_write(w->pmu, WIFI2AP_MEM_CONFIG3, 0);
 	reinit_completion(&w->started);
+	WRITE_ONCE(w->fw_up, false);
 	return ret;
 }
 
@@ -732,6 +735,7 @@ static int zrn_wlbt_boot(struct zrn_wlbt *w)
 	atomic_set(&w->mbox_irqs, 0);
 	atomic_set(&w->wdog_irqs, 0);
 	reinit_completion(&w->started);
+	WRITE_ONCE(w->fw_up, false);
 	w->rf_hw_ver = 0;
 	w->log_head = w->log_count = 0;
 	WRITE_ONCE(w->running, true);
@@ -908,7 +912,7 @@ struct scsc_service *scsc_mx_service_open(struct scsc_mx *mx, enum scsc_service_
 		ret = zrn_wlbt_boot(w);
 		w->booted_by_service = true;
 	}
-	if (!ret && !completion_done(&w->started))
+	if (!ret && !READ_ONCE(w->fw_up))
 		ret = -EIO;		/* no MM_START_IND */
 	if (ret) {
 		if (w->running && list_empty(&w->services))
