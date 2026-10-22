@@ -739,13 +739,14 @@ MODULE_DEVICE_TABLE(of, acpm_autoload);""")
 # from the Galaxy Tab A 10.1 2019 port (github.com/Mollomm1/linux-exynos7885,
 # branch gta3xl), which follows Samsung's CAL tables.
 #
-# For now only described, so the kernel can read what the bootloader set: only
-# PLL, mux and divider registers are listed, so registering writes nothing
-# (exynos_arm64_init_clocks() only touches gate registers), no clock of it is
-# enabled, and the GPU keeps its fixed clock in the device tree. Its power
-# domain is the bootloader's and stays on (pd_ignore_unused); before anything
-# here can change a rate, PLL_G3D's relock needs the GPU parked on the switching
-# clock, as Samsung's DVFS and the T510 port do.
+# Only PLL, mux and divider registers are listed, so registering writes nothing
+# (exynos_arm64_init_clocks() only touches gate registers). The GPU's rate
+# requests (Panfrost's devfreq) go up to PLL_G3D, whose levels are the M20's
+# own ECT's (sboot, mmcblk0boot0 at 0x44400: PLL_G3D 343 to 1300 MHz, the same
+# P/M/S as here; MINMAX_dvfs_g3d caps this chip's table at 845 MHz). PLL_G3D's
+# output is unstable until it relocks, so a notifier parks the GPU on the
+# switching path for the change (BUSD mux), as Samsung's DVFS and the T510 port
+# do. Its power domain is the bootloader's and stays on (pd_ignore_unused).
 CLKH = "include/dt-bindings/clock/exynos7885.h"
 insert(CLKH, "CLK_DOUT_G3D_SWITCH",
        "#define CLK_MOUT_SHARED1_PLL\t\t62\n",
@@ -829,13 +830,18 @@ PNAME(mout_g3d_switch_user_p)	= { "oscclk", "dout_g3d_switch" };
 PNAME(mout_g3d_busd_p)		= { "mout_g3d_pll", "mout_g3d_switch_user" };
 
 static const struct samsung_mux_clock g3d_mux_clks[] __initconst = {
-	MUX(CLK_MOUT_G3D_PLL, "mout_g3d_pll", mout_g3d_pll_p,
-	    PLL_CON0_PLL_G3D, 4, 1),
+	MUX_F(CLK_MOUT_G3D_PLL, "mout_g3d_pll", mout_g3d_pll_p,
+	      PLL_CON0_PLL_G3D, 4, 1,
+	      CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT, 0),
 	MUX(CLK_MOUT_G3D_SWITCH_USER, "mout_g3d_switch_user",
 	    mout_g3d_switch_user_p, PLL_CON0_MUX_CLKCMU_G3D_SWITCH_USER, 4, 1),
-	/* clocks both the Mali core and the G3D data bus */
-	MUX(CLK_MOUT_G3D_BUSD, "mout_g3d_busd", mout_g3d_busd_p,
-	    CLK_CON_MUX_MUX_CLK_G3D_BUSD, 0, 1),
+	/*
+	 * Clocks both the Mali core and the G3D data bus. Rate requests go to
+	 * PLL_G3D; the switch to the other parent is the notifier's alone.
+	 */
+	MUX_F(CLK_MOUT_G3D_BUSD, "mout_g3d_busd", mout_g3d_busd_p,
+	      CLK_CON_MUX_MUX_CLK_G3D_BUSD, 0, 1,
+	      CLK_SET_RATE_PARENT | CLK_SET_RATE_NO_REPARENT, 0),
 };
 
 static const struct samsung_div_clock g3d_div_clks[] __initconst = {
@@ -855,7 +861,81 @@ static const struct samsung_cmu_info g3d_cmu_info __initconst = {
 	.nr_clk_regs		= ARRAY_SIZE(g3d_clk_regs),
 };
 
+#define G3D_BUSD_SEL_SWITCH	BIT(0)
+#define G3D_MUX_BUSY		BIT(16)
+
+static void __iomem *g3d_busd_reg;
+static bool g3d_parked;
+
+static void exynos7885_g3d_busd_select(bool use_switch)
+{
+	u32 val = readl(g3d_busd_reg);
+
+	if (use_switch)
+		val |= G3D_BUSD_SEL_SWITCH;
+	else
+		val &= ~G3D_BUSD_SEL_SWITCH;
+	writel(val, g3d_busd_reg);
+
+	if (readl_poll_timeout_atomic(g3d_busd_reg, val, !(val & G3D_MUX_BUSY), 1, 100))
+		pr_warn("exynos7885: G3D BUSD mux stays busy\\n");
+}
+
+/*
+ * PLL_G3D's output is unstable until it locks again: run the GPU from the
+ * switching path meanwhile (Samsung's DVFS does the same). That path is slower
+ * than any PLL_G3D level, so it is safe at the old level's voltage and the new.
+ */
+static int exynos7885_g3d_pll_notifier(struct notifier_block *nb,
+				       unsigned long event, void *data)
+{
+	switch (event) {
+	case PRE_RATE_CHANGE:
+		g3d_parked = !(readl(g3d_busd_reg) & G3D_BUSD_SEL_SWITCH);
+		if (g3d_parked)
+			exynos7885_g3d_busd_select(true);
+		break;
+	case POST_RATE_CHANGE:
+	case ABORT_RATE_CHANGE:
+		if (g3d_parked)
+			exynos7885_g3d_busd_select(false);
+		g3d_parked = false;
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block exynos7885_g3d_pll_nb = {
+	.notifier_call = exynos7885_g3d_pll_notifier,
+};
+
+static int exynos7885_g3d_register_notifier(struct device *dev)
+{
+	struct of_phandle_args args = {
+		.np = dev->of_node,
+		.args_count = 1,
+		.args = { CLK_FOUT_G3D_PLL },
+	};
+	struct clk *pll;
+
+	g3d_busd_reg = devm_of_iomap(dev, dev->of_node, 0, NULL);
+	if (IS_ERR(g3d_busd_reg))
+		return PTR_ERR(g3d_busd_reg);
+	g3d_busd_reg += CLK_CON_MUX_MUX_CLK_G3D_BUSD;
+
+	pll = of_clk_get_from_provider(&args);
+	if (IS_ERR(pll))
+		return PTR_ERR(pll);
+	return clk_notifier_register(pll, &exynos7885_g3d_pll_nb);
+}
+
 """, after=False)
+insert(CLK, "exynos7885_g3d_register_notifier(dev);",
+       "\texynos_arm64_register_cmu(dev, dev->of_node, info);\n",
+       "\tif (info == &g3d_cmu_info)\n\t\treturn exynos7885_g3d_register_notifier(dev);\n")
+insert(CLK, "#include <linux/iopoll.h>",
+       "#include <linux/clk-provider.h>\n",
+       "#include <linux/clk.h>\n#include <linux/iopoll.h>\n#include <linux/of_address.h>\n", after=False)
 insert(CLK, '"samsung,exynos7885-cmu-g3d"',
        "\t\t.data = &fsys_cmu_info,\n",
        """	}, {

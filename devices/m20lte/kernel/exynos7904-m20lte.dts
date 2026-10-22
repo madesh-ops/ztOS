@@ -34,16 +34,35 @@
 	};
 
 	/*
-	 * The GPU's clock (CMU_G3D's G3D PLL) is set through ACPM in the M20
-	 * kernel and has no mainline driver; the bootloader leaves it running.
-	 * Panfrost needs a clock to enable: this one only names it, at the
-	 * stock kernel's minimum and DVFS start (gpu_min_clock, 343 MHz).
+	 * The GPU's levels and voltages, this chip's own: the ECT in sboot
+	 * (mmcblk0boot0 at 0x44400), ASV table 2 (the fused version, 20, has
+	 * no table of its own: MINMAX_dvfs_g3d's row for it names table 2 and
+	 * 343-845 MHz), GPU group 9 (the ASV fuses, read through EL3). The
+	 * bootloader's 600 mV at 343 MHz is exactly this table's first level.
 	 */
-	gpu_clk: clock-g3d {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <343000000>;
-		clock-output-names = "g3d_bootloader";
+	gpu_opp_table: opp-table-gpu {
+		compatible = "operating-points-v2";
+
+		opp-343000000 {
+			opp-hz = /bits/ 64 <343000000>;
+			opp-microvolt = <600000>;
+		};
+		opp-450000000 {
+			opp-hz = /bits/ 64 <450000000>;
+			opp-microvolt = <612500>;
+		};
+		opp-545000000 {
+			opp-hz = /bits/ 64 <545000000>;
+			opp-microvolt = <650000>;
+		};
+		opp-676000000 {
+			opp-hz = /bits/ 64 <676000000>;
+			opp-microvolt = <681250>;
+		};
+		opp-845000000 {
+			opp-hz = /bits/ 64 <845000000>;
+			opp-microvolt = <762500>;
+		};
 	};
 
 	chosen {
@@ -230,13 +249,15 @@
 
 	/*
 	 * The Mali-G71's supply, the S2MPU08's BUCK5, over ACPM channel 2
-	 * (devices/m20lte/drivers/zrn-s2mpu08-g3d.c). No voltage limits: the
-	 * regulator core may only read it.
+	 * (devices/m20lte/drivers/zrn-s2mpu08-g3d.c), within gpu_opp_table's
+	 * range only.
 	 */
 	vdd_g3d: regulator-vdd-g3d {
 		compatible = "samsung,s2mpu08-acpm-buck5";
 		samsung,acpm-ipc = <&acpm_ipc 2>;
 		regulator-name = "vdd_g3d";
+		regulator-min-microvolt = <600000>;
+		regulator-max-microvolt = <762500>;
 	};
 };
 
@@ -359,9 +380,9 @@
 		};
 	};
 
-	/* The GPU's clocks (CMU_G3D, patch-kernel.py): described so the rate
-	 * the bootloader set can be read (clk_summary), and nothing more yet.
-	 * No consumer: the GPU still runs from gpu_clk. */
+	/* The GPU's clocks (CMU_G3D, patch-kernel.py): PLL_G3D through the
+	 * BUSD mux, which a notifier parks on the switching path while the PLL
+	 * relocks. */
 	cmu_g3d: clock-controller@11400000 {
 		compatible = "samsung,exynos7885-cmu-g3d";
 		reg = <0x11400000 0x8000>;
@@ -372,10 +393,11 @@
 
 	/* Mali-G71 MP2 (GPU_ID 0x60a00002, r0p0): mali@11500000 in the M20
 	 * kernel's exynos7885-mali_common.dtsi, with its JOB, MMU and GPU
-	 * interrupts. Its power domain (PMU 0x11c840a0) and its clock are on
-	 * from the bootloader and have no mainline driver yet: the power
-	 * domain is not described, the clock is gpu_clk above, and Panfrost
-	 * runs the GPU at whatever rate it was left at. */
+	 * interrupts. Its power domain (PMU 0x11c840a0) is on from the
+	 * bootloader and not described. Panfrost's devfreq scales it over
+	 * gpu_opp_table, 343-845 MHz, its supply with it. The supply comes
+	 * with the ACPM modules (modules-load.d/m20-gpu.conf), so Panfrost
+	 * waits for them. */
 	gpu: gpu@11500000 {
 		compatible = "arm,mali-bifrost";
 		reg = <0x11500000 0x5000>;
@@ -383,7 +405,9 @@
 			     <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH>,
 			     <GIC_SPI 158 IRQ_TYPE_LEVEL_HIGH>;
 		interrupt-names = "job", "mmu", "gpu";
-		clocks = <&gpu_clk>;
+		clocks = <&cmu_g3d CLK_MOUT_G3D_BUSD>;
+		mali-supply = <&vdd_g3d>;
+		operating-points-v2 = <&gpu_opp_table>;
 	};
 
 	/* The Wi-Fi/BT subsystem (Samsung SCSC "Maxwell", S612): scsc_wifibt in
