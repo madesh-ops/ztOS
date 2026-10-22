@@ -534,8 +534,9 @@ static int zrn_wlbt_boot(struct zrn_wlbt *w)
 	long left;
 	int ret, conf_off;
 
+	/* running already (powered and out of reset); a stop leaves it powered, in reset */
 	regmap_read(w->pmu, WIFI_CTRL_NS, &ctrl);
-	if (ctrl & WIFI_PWRON)
+	if ((ctrl & WIFI_PWRON) && !(ctrl & WIFI_RESET_SET))
 		return -EBUSY;
 
 	ret = request_firmware(&fw, FW_NAME, w->dev);
