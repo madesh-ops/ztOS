@@ -942,3 +942,42 @@ insert(CLK, '"samsung,exynos7885-cmu-g3d"',
 		.compatible = "samsung,exynos7885-cmu-g3d",
 		.data = &g3d_cmu_info,
 """)
+
+
+def apply_patch(name, marker_rel, marker):
+    """A whole patch from kernel/patches/, for changes too big for insert()."""
+    import subprocess
+    if marker in read(tree / marker_rel):
+        print(f"patch-kernel: {name}: already")
+        return
+    p = Path(__file__).parent / "patches" / name
+    r = subprocess.run(["patch", "-p1", "-N", "-s", "-d", str(tree), "-i", str(p)],
+                       capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(f"patch-kernel: {name}: does not apply:\n{r.stdout}{r.stderr}")
+    print(f"patch-kernel: {name}: done")
+
+
+# --- temperature sensors ---------------------------------------------------------
+# The Exynos 7885's two TMUs (CPU at 0x10070000, G3D at 0x10074000): the Exynos7
+# register layout with its own 25 C trimming range, from the Galaxy Tab A 10.1
+# 2019 port (github.com/Mollomm1/linux-exynos7885, branch gta3xl, commit
+# 5060243320), whose author's patch is kept whole in kernel/patches/. Their only
+# clock is CMU_PERI's TMU APB gate, which the bootloader leaves on; it is not in
+# peri_clk_regs, so registering it writes nothing.
+apply_patch("exynos_tmu-exynos7885.patch", "drivers/thermal/samsung/exynos_tmu.c",
+            "SOC_ARCH_EXYNOS7885")
+insert(CLKH, "CLK_GOUT_TMU_PCLK",
+       "#define CLK_GOUT_WDT1_PCLK\t\t43\n",
+       "#define CLK_GOUT_TMU_PCLK\t\t44\n")
+replace(CLK, "(CLK_GOUT_TMU_PCLK + 1)",
+        "#define CLKS_NR_PERI\t\t\t(CLK_GOUT_WDT1_PCLK + 1)",
+        "#define CLKS_NR_PERI\t\t\t(CLK_GOUT_TMU_PCLK + 1)")
+insert(CLK, "CLK_CON_GAT_GOUT_PERI_TMU_PCLK",
+       "#define CLK_CON_GAT_GOUT_PERI_GPIO_TOP_PCLK\t0x2024\n",
+       "#define CLK_CON_GAT_GOUT_PERI_TMU_PCLK\t\t0x2010\n", after=False)
+insert(CLK, '"gout_tmu_pclk"',
+       "\t     CLK_CON_GAT_GOUT_PERI_WDT_CLUSTER1_PCLK, 21, 0, 0),\n",
+       """	GATE(CLK_GOUT_TMU_PCLK, "gout_tmu_pclk", "mout_peri_bus_user",
+	     CLK_CON_GAT_GOUT_PERI_TMU_PCLK, 21, 0, 0),
+""")

@@ -22,6 +22,7 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/soc/samsung,exynos-usi.h>
+#include <dt-bindings/thermal/thermal.h>
 
 / {
 	model = "Samsung Galaxy M20";
@@ -239,6 +240,55 @@
 		reg = <0x0 0x02052000 0x1b000>;
 	};
 
+	/*
+	 * Samsung's G3D zone throttles from 76 C (exynos7885.dtsi: G3D's
+	 * trips), its devfreq step by step here; 115 C is critical, as in the
+	 * Galaxy Tab A 10.1 2019 port. The CPUs have no cpufreq in this
+	 * build (CPU_FREQ is off), so their zone only shuts down at 115 C.
+	 */
+	thermal-zones {
+		cpu-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tmu_cpu>;
+
+			trips {
+				cpu-crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		gpu-thermal {
+			polling-delay-passive = <250>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tmu_g3d>;
+
+			trips {
+				gpu_alert0: gpu-alert0 {
+					temperature = <76000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				gpu-crit {
+					temperature = <115000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&gpu_alert0>;
+					cooling-device = <&gpu THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
+		};
+	};
+
 	firmware {
 		acpm_ipc: power-management {
 			compatible = "samsung,exynos7885-acpm-ipc";
@@ -408,6 +458,8 @@
 		clocks = <&cmu_g3d CLK_MOUT_G3D_BUSD>;
 		mali-supply = <&vdd_g3d>;
 		operating-points-v2 = <&gpu_opp_table>;
+		/* gpu-thermal throttles it through its devfreq */
+		#cooling-cells = <2>;
 	};
 
 	/* The Wi-Fi/BT subsystem (Samsung SCSC "Maxwell", S612): scsc_wifibt in
@@ -423,6 +475,28 @@
 		interrupt-names = "mbox", "wdog";
 		samsung,syscon-phandle = <&pmu_system_controller>;
 		memory-region = <&wlbt_mem>;
+	};
+
+	/* The temperature sensors, BIG@10070000 (the CPU clusters, SPI 231)
+	 * and G3D@10074000 (SPI 280) in the M20 kernel's exynos7885.dtsi:
+	 * exynos_tmu's Exynos 7885 variant (kernel/patches/), clocked by
+	 * CMU_PERI's TMU APB gate. */
+	tmu_cpu: thermal-sensor@10070000 {
+		compatible = "samsung,exynos7885-tmu";
+		reg = <0x10070000 0x400>;
+		interrupts = <GIC_SPI 231 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cmu_peri CLK_GOUT_TMU_PCLK>;
+		clock-names = "tmu_apbif";
+		#thermal-sensor-cells = <0>;
+	};
+
+	tmu_g3d: thermal-sensor@10074000 {
+		compatible = "samsung,exynos7885-tmu";
+		reg = <0x10074000 0x400>;
+		interrupts = <GIC_SPI 280 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cmu_peri CLK_GOUT_TMU_PCLK>;
+		clock-names = "tmu_apbif";
+		#thermal-sensor-cells = <0>;
 	};
 
 	/* The AP-to-APM doorbell ACPM rings (drivers/zrn-acpm-mbox.c) */
