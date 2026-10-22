@@ -54,18 +54,22 @@
  */
 #include <linux/arm-smccc.h>
 #include <linux/bitfield.h>
+#include <linux/bitmap.h>
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/list.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
+#include <linux/slab.h>
 #include <linux/sizes.h>
 #include <linux/unaligned.h>
+#include <scsc/scsc_mx.h>
 
 #define FW_NAME			"scsc/mx140.bin"
 
@@ -169,6 +173,13 @@ static_assert(sizeof(struct mxconf) == 176);
 #define MGMT_PACKET		8
 #define MGMT_PACKETS		(512 / MGMT_PACKET)
 #define MGMT_CHAN_MAXWELL	0
+#define MGMT_CHAN_SERVICE	1	/* servman_messages.h */
+#define SM_MSG_START_REQ	0
+#define SM_MSG_START_CFM	1
+#define SM_MSG_STOP_REQ		2
+#define SM_MSG_STOP_CFM		3
+#define SM_TIMEOUT_MS		1000	/* sm_completion_timeout_ms */
+#define SCSC_MIFRAM_INVALID_REF	(-1)	/* scsc_mif_abs.h */
 #define MM_START_IND		0
 #define MM_HALT_REQ		1
 #define MM_HALT_RSP		6
@@ -204,7 +215,10 @@ struct zrn_wlbt {
 	char build_id[FWHDR_BUILD_ID_LEN];
 
 	/* stage 2 */
-	u32 heap;			/* next free offset in the window */
+	struct mutex heap_lock;
+	unsigned long *blocks;		/* the window in HEAP_BLOCKs, set = in use */
+	u32 heap_start;			/* after the firmware's runtime area */
+	struct list_head allocs;	/* struct heap_alloc */
 	u16 tohost_used, fromhost_used[2];
 	struct mx_stream mgmt_in, mgmt_out, gdb_r4_in, gdb_r4_out,
 			 gdb_m4_in, gdb_m4_out, mxlog;
@@ -214,6 +228,22 @@ struct zrn_wlbt {
 	spinlock_t log_lock;
 	u32 log[MXLOG_KEEP];
 	unsigned int log_head, log_count;
+
+	/* stage 3: the SCSC core interface, for the WLAN and BT drivers */
+	struct {
+		scsc_mifintrbit_handler fn;
+		void *data;
+	} tohost[INTR_BITS];
+	u16 own_bits;			/* to-AP bits of the transports above */
+	spinlock_t svc_lock;
+	struct list_head services;
+	bool booted_by_service;
+};
+
+struct heap_alloc {
+	struct list_head node;
+	u32 off;
+	unsigned int n;
 };
 
 static u32 *win32(struct zrn_wlbt *w, u32 off)
@@ -221,14 +251,67 @@ static u32 *win32(struct zrn_wlbt *w, u32 off)
 	return w->mem + off;
 }
 
-static u32 heap_alloc(struct zrn_wlbt *w, u32 bytes)
+/*
+ * The window's heap, as miframman: 64-byte blocks after the firmware's
+ * runtime area, aligned in the R4's view (the window is at its 0). Returns
+ * the offset, 0 when there is no room (0 is the firmware's own).
+ */
+static u32 heap_alloc(struct zrn_wlbt *w, u32 bytes, u32 align)
 {
-	u32 off = w->heap;
+	unsigned long nr = w->mem_size / HEAP_BLOCK, start;
+	unsigned int n = DIV_ROUND_UP(bytes, HEAP_BLOCK);
+	struct heap_alloc *a;
 
-	if (off + bytes > w->mem_size)
+	align = max_t(u32, align, HEAP_BLOCK);
+	if (!bytes || !is_power_of_2(align))
 		return 0;
-	w->heap = ALIGN(off + bytes, HEAP_BLOCK);
-	return off;
+	a = kmalloc(sizeof(*a), GFP_KERNEL);
+	if (!a)
+		return 0;
+	mutex_lock(&w->heap_lock);
+	start = bitmap_find_next_zero_area(w->blocks, nr, w->heap_start / HEAP_BLOCK, n,
+					   align / HEAP_BLOCK - 1);
+	if (start >= nr) {
+		mutex_unlock(&w->heap_lock);
+		kfree(a);
+		return 0;
+	}
+	bitmap_set(w->blocks, start, n);
+	a->off = start * HEAP_BLOCK;
+	a->n = n;
+	list_add(&a->node, &w->allocs);
+	mutex_unlock(&w->heap_lock);
+	return a->off;
+}
+
+static void heap_free(struct zrn_wlbt *w, u32 off)
+{
+	struct heap_alloc *a;
+
+	mutex_lock(&w->heap_lock);
+	list_for_each_entry(a, &w->allocs, node)
+		if (a->off == off) {
+			bitmap_clear(w->blocks, off / HEAP_BLOCK, a->n);
+			list_del(&a->node);
+			kfree(a);
+			break;
+		}
+	mutex_unlock(&w->heap_lock);
+}
+
+/* Everything freed, the heap starting after a runtime area of this size */
+static void heap_reset(struct zrn_wlbt *w, u32 runtime)
+{
+	struct heap_alloc *a, *t;
+
+	mutex_lock(&w->heap_lock);
+	list_for_each_entry_safe(a, t, &w->allocs, node) {
+		list_del(&a->node);
+		kfree(a);
+	}
+	bitmap_zero(w->blocks, w->mem_size / HEAP_BLOCK);
+	w->heap_start = ALIGN(runtime, HEAP_BLOCK);
+	mutex_unlock(&w->heap_lock);
 }
 
 /* the bit numbers Samsung's mifintrbit hands out, in the same order */
@@ -253,9 +336,9 @@ static int stream_init(struct zrn_wlbt *w, struct mx_stream *s, bool in, int tar
 	s->num = num;
 	s->size = size;
 	s->in = in;
-	s->buf = heap_alloc(w, num * size);
-	s->ridx = heap_alloc(w, 4);
-	s->widx = heap_alloc(w, 4);
+	s->buf = heap_alloc(w, num * size, 4);
+	s->ridx = heap_alloc(w, 4, 4);
+	s->widx = heap_alloc(w, 4, 4);
 	if (!s->buf || !s->ridx || !s->widx)
 		return -ENOMEM;
 	*win32(w, s->ridx) = 0;
@@ -301,7 +384,7 @@ static int mxconf_build(struct zrn_wlbt *w, u32 runtime)
 	u32 off;
 	int ret = 0;
 
-	w->heap = ALIGN(runtime, HEAP_BLOCK);
+	heap_reset(w, runtime);
 	w->tohost_used = 0;
 	w->fromhost_used[TARGET_R4] = BIT(0);	/* MIFINTRBIT_RESERVED_PANIC_R4 */
 	w->fromhost_used[TARGET_M4] = BIT(0);
@@ -317,7 +400,7 @@ static int mxconf_build(struct zrn_wlbt *w, u32 runtime)
 	if (ret)
 		return ret;
 
-	off = heap_alloc(w, sizeof(*conf));
+	off = heap_alloc(w, sizeof(*conf), 4);
 	if (!off)
 		return -ENOMEM;
 	conf = w->mem + off;
@@ -332,6 +415,8 @@ static int mxconf_build(struct zrn_wlbt *w, u32 runtime)
 	stream_conf(&w->gdb_m4_in, &conf->gdb_m4.to_ap);
 	stream_conf(&w->gdb_m4_out, &conf->gdb_m4.from_ap);
 	stream_conf(&w->mxlog, &conf->mxlog);
+	w->own_bits = w->tohost_used;
+	memset(w->tohost, 0, sizeof(w->tohost));
 	return off;
 }
 
@@ -382,6 +467,36 @@ static int stream_push(struct zrn_wlbt *w, struct mx_stream *s, const void *pkt)
 	return 0;
 }
 
+struct scsc_service {
+	struct list_head node;
+	struct zrn_wlbt *w;
+	enum scsc_service_id id;
+	struct scsc_service_client *client;
+	struct completion start_cfm, stop_cfm;
+};
+
+/* srv_message_handler(): SM_MSG_*_CFM for a service, by its id */
+static void service_message(struct zrn_wlbt *w, u8 id, u8 msg)
+{
+	struct scsc_service *svc;
+
+	spin_lock(&w->svc_lock);
+	list_for_each_entry(svc, &w->services, node) {
+		if (svc->id != id)
+			continue;
+		if (msg == SM_MSG_START_CFM)
+			complete(&svc->start_cfm);
+		else if (msg == SM_MSG_STOP_CFM)
+			complete(&svc->stop_cfm);
+		else
+			dev_warn(w->dev, "service %u: unknown message %u\n", id, msg);
+		spin_unlock(&w->svc_lock);
+		return;
+	}
+	spin_unlock(&w->svc_lock);
+	dev_warn(w->dev, "message %u for service %u, which is not open\n", msg, id);
+}
+
 static void mgmt_drain(struct zrn_wlbt *w)
 {
 	const u8 *p;
@@ -393,7 +508,10 @@ static void mgmt_drain(struct zrn_wlbt *w)
 		u8 chan = p[0], msg = p[1];
 		u32 arg = get_unaligned_le32(p + 2);
 
-		if (chan != MGMT_CHAN_MAXWELL)
+		if (chan == MGMT_CHAN_SERVICE)
+			/* struct sm_msg_packet { u8 service_id; u8 msg; u32 optional_data; } */
+			service_message(w, p[1], p[2]);
+		else if (chan != MGMT_CHAN_MAXWELL)
 			dev_info(w->dev, "management message on channel %u: %*ph\n", chan, MGMT_PACKET, p);
 		else if (msg == MM_START_IND) {
 			w->rf_hw_ver = arg;
@@ -451,14 +569,31 @@ static irqreturn_t zrn_wlbt_mbox_irq(int irq, void *data)
 {
 	struct zrn_wlbt *w = data;
 	u32 pending = readl(w->r4 + MBOX_INTMSR0) >> 16;
-	u32 acks;
+	u32 acks, own = pending & w->own_bits;
+	unsigned long other = pending & ~w->own_bits;
+	int bit;
 
-	/* clear first, so a packet written meanwhile raises it again */
-	writel(pending << 16, w->r4 + MBOX_INTCR0);
+	/* our transports' bits: cleared first, so a packet written meanwhile raises it again */
+	writel(own << 16, w->r4 + MBOX_INTCR0);
 	if (atomic_inc_return(&w->mbox_irqs) <= 4)
 		dev_info(w->dev, "mailbox interrupt from the firmware: %#x\n", pending);
-	if (!READ_ONCE(w->running))
+	if (!READ_ONCE(w->running)) {
+		writel(other << 16, w->r4 + MBOX_INTCR0);
 		return IRQ_HANDLED;
+	}
+
+	/*
+	 * A service's bits go to its handler, which clears them itself
+	 * (mifiintrman_isr()); one nobody handles is cleared and masked.
+	 */
+	for_each_set_bit(bit, &other, INTR_BITS) {
+		if (w->tohost[bit].fn) {
+			w->tohost[bit].fn(bit, w->tohost[bit].data);
+		} else {
+			writel(BIT(bit + 16), w->r4 + MBOX_INTCR0);
+			writel(readl(w->r4 + MBOX_INTMR0) | BIT(bit + 16), w->r4 + MBOX_INTMR0);
+		}
+	}
 
 	if (pending & stream_tohost_bit(&w->mgmt_in))
 		mgmt_drain(w);
@@ -566,8 +701,8 @@ static int zrn_wlbt_boot(struct zrn_wlbt *w)
 		ret = conf_off;
 		goto out;
 	}
-	dev_info(w->dev, "%s: %s, entry %#x, runtime %#x, config at %#x, heap used to %#x\n",
-		 FW_NAME, w->build_id, entry, runtime, conf_off, w->heap);
+	dev_info(w->dev, "%s: %s, entry %#x, runtime %#x, config at %#x\n",
+		 FW_NAME, w->build_id, entry, runtime, conf_off);
 
 	/* 2 */
 	mbox_reset(w);
@@ -653,6 +788,8 @@ static ssize_t boot_store(struct device *dev, struct device_attribute *attr,
 	mutex_lock(&w->lock);
 	if (on)
 		ret = w->running ? -EBUSY : zrn_wlbt_boot(w);
+	else if (!list_empty(&w->services))
+		ret = -EBUSY;		/* the WLAN or BT driver has it open */
 	else
 		ret = w->running ? zrn_wlbt_stop(w) : 0;
 	mutex_unlock(&w->lock);
@@ -694,6 +831,413 @@ static struct attribute *zrn_wlbt_attrs[] = {
 };
 ATTRIBUTE_GROUPS(zrn_wlbt);
 
+/*
+ * Stage 3: the part of Samsung's SCSC core (include/scsc/scsc_mx.h) that its
+ * WLAN driver (drivers/scsc-wlan) uses, on top of the boot above. A struct
+ * scsc_mx is this driver's struct zrn_wlbt. There is no recovery: a failed
+ * firmware stays failed until its services are closed.
+ */
+static struct zrn_wlbt *zrn_core;
+static struct scsc_mx_module_client *zrn_client;
+static DEFINE_MUTEX(zrn_client_lock);
+
+static struct zrn_wlbt *to_w(struct scsc_mx *mx)
+{
+	return (struct zrn_wlbt *)mx;
+}
+
+static struct scsc_mx *to_mx(struct zrn_wlbt *w)
+{
+	return (struct scsc_mx *)w;
+}
+
+int scsc_mx_module_register_client_module(struct scsc_mx_module_client *client)
+{
+	mutex_lock(&zrn_client_lock);
+	if (zrn_client) {
+		mutex_unlock(&zrn_client_lock);
+		return -EBUSY;
+	}
+	zrn_client = client;
+	if (zrn_core)
+		client->probe(client, to_mx(zrn_core), SCSC_MODULE_CLIENT_REASON_HW_PROBE);
+	mutex_unlock(&zrn_client_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_module_register_client_module);
+
+void scsc_mx_module_unregister_client_module(struct scsc_mx_module_client *client)
+{
+	mutex_lock(&zrn_client_lock);
+	if (zrn_client == client) {
+		if (zrn_core)
+			client->remove(client, to_mx(zrn_core), SCSC_MODULE_CLIENT_REASON_HW_REMOVE);
+		zrn_client = NULL;
+	}
+	mutex_unlock(&zrn_client_lock);
+}
+EXPORT_SYMBOL_GPL(scsc_mx_module_unregister_client_module);
+
+struct device *scsc_mx_get_device(struct scsc_mx *mx)
+{
+	return to_w(mx)->dev;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_get_device);
+
+/* scsc_mx_service_open(): boots the firmware for the first service */
+struct scsc_service *scsc_mx_service_open(struct scsc_mx *mx, enum scsc_service_id id,
+					  struct scsc_service_client *client, int *status)
+{
+	struct zrn_wlbt *w = to_w(mx);
+	struct scsc_service *svc;
+	int ret = 0;
+
+	svc = kzalloc(sizeof(*svc), GFP_KERNEL);
+	if (!svc) {
+		*status = -ENOMEM;
+		return NULL;
+	}
+	svc->w = w;
+	svc->id = id;
+	svc->client = client;
+	init_completion(&svc->start_cfm);
+	init_completion(&svc->stop_cfm);
+
+	mutex_lock(&w->lock);
+	if (!w->running) {
+		ret = zrn_wlbt_boot(w);
+		w->booted_by_service = true;
+	}
+	if (!ret && !completion_done(&w->started))
+		ret = -EIO;		/* no MM_START_IND */
+	if (ret) {
+		if (w->running && list_empty(&w->services))
+			zrn_wlbt_stop(w);
+		mutex_unlock(&w->lock);
+		kfree(svc);
+		*status = ret;
+		return NULL;
+	}
+	spin_lock_irq(&w->svc_lock);
+	list_add(&svc->node, &w->services);
+	spin_unlock_irq(&w->svc_lock);
+	mutex_unlock(&w->lock);
+	dev_info(w->dev, "service %d open\n", id);
+	*status = 0;
+	return svc;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_open);
+
+/* scsc_mx_service_close(): the last service shuts the firmware down */
+int scsc_mx_service_close(struct scsc_service *svc)
+{
+	struct zrn_wlbt *w = svc->w;
+
+	mutex_lock(&w->lock);
+	spin_lock_irq(&w->svc_lock);
+	list_del(&svc->node);
+	spin_unlock_irq(&w->svc_lock);
+	if (list_empty(&w->services) && w->running && w->booted_by_service) {
+		zrn_wlbt_stop(w);
+		w->booted_by_service = false;
+	}
+	mutex_unlock(&w->lock);
+	dev_info(w->dev, "service %d closed\n", svc->id);
+	kfree(svc);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_close);
+
+/* SM_MSG_START_REQ / SM_MSG_STOP_REQ on the management transport, answered in 1 s */
+static int service_request(struct scsc_service *svc, u8 msg, u32 ref, struct completion *cfm)
+{
+	struct zrn_wlbt *w = svc->w;
+	u8 pkt[MGMT_PACKET] = { MGMT_CHAN_SERVICE, svc->id, msg };
+	int ret;
+
+	put_unaligned_le32(ref, pkt + 3);
+	reinit_completion(cfm);
+	mutex_lock(&w->lock);
+	ret = w->running ? stream_push(w, &w->mgmt_out, pkt) : -EIO;
+	mutex_unlock(&w->lock);
+	if (ret)
+		return ret;
+	if (!wait_for_completion_timeout(cfm, msecs_to_jiffies(SM_TIMEOUT_MS))) {
+		dev_err(w->dev, "service %d: no answer to message %u\n", svc->id, msg);
+		return -ETIMEDOUT;
+	}
+	return 0;
+}
+
+int scsc_mx_service_start(struct scsc_service *svc, scsc_mifram_ref ref)
+{
+	return service_request(svc, SM_MSG_START_REQ, ref, &svc->start_cfm);
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_start);
+
+int scsc_mx_service_stop(struct scsc_service *svc)
+{
+	return service_request(svc, SM_MSG_STOP_REQ, 0, &svc->stop_cfm);
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_stop);
+
+void scsc_mx_service_service_failed(struct scsc_service *svc, const char *reason)
+{
+	dev_err(svc->w->dev, "service %d failed: %s\n", svc->id, reason);
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_service_failed);
+
+int scsc_mx_service_mif_dump_registers(struct scsc_service *svc)
+{
+	struct zrn_wlbt *w = svc->w;
+
+	dev_info(w->dev, "mailbox: INTMR0 %#x INTSR0 %#x INTMSR0 %#x INTMR1 %#x\n",
+		 readl(w->r4 + MBOX_INTMR0), readl(w->r4 + MBOX_INTSR0),
+		 readl(w->r4 + MBOX_INTMSR0), readl(w->r4 + MBOX_INTMR1));
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_mif_dump_registers);
+
+/* The window: a mifram_ref is an offset in it, the R4's address */
+void *scsc_mx_service_mif_addr_to_ptr(struct scsc_service *svc, scsc_mifram_ref ref)
+{
+	if (ref >= svc->w->mem_size)
+		return NULL;
+	return svc->w->mem + ref;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_mif_addr_to_ptr);
+
+int scsc_mx_service_mif_ptr_to_addr(struct scsc_service *svc, void *ptr, scsc_mifram_ref *ref)
+{
+	struct zrn_wlbt *w = svc->w;
+
+	if (ptr < w->mem || ptr >= w->mem + w->mem_size)
+		return -ENOMEM;
+	*ref = ptr - w->mem;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_mif_ptr_to_addr);
+
+int scsc_mx_service_mifram_alloc(struct scsc_service *svc, size_t nbytes,
+				 scsc_mifram_ref *ref, u32 align)
+{
+	u32 off = nbytes <= U32_MAX ? heap_alloc(svc->w, nbytes, align) : 0;
+
+	if (!off) {
+		*ref = SCSC_MIFRAM_INVALID_REF;
+		return -ENOMEM;
+	}
+	*ref = off;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_mifram_alloc);
+
+void scsc_mx_service_mifram_free(struct scsc_service *svc, scsc_mifram_ref ref)
+{
+	heap_free(svc->w, ref);
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_mifram_free);
+
+/* Mailbox bits: to the AP in the upper half of the R4 mailbox's INT*0 */
+int scsc_service_mifintrbit_bit_mask_status_get(struct scsc_service *svc)
+{
+	return readl(svc->w->r4 + MBOX_INTMR0) >> 16;
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_bit_mask_status_get);
+
+void scsc_service_mifintrbit_bit_clear(struct scsc_service *svc, int bit)
+{
+	if (bit >= 0 && bit < INTR_BITS)
+		writel(BIT(bit + 16), svc->w->r4 + MBOX_INTCR0);
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_bit_clear);
+
+static void intmr0_update(struct zrn_wlbt *w, int bit, bool mask)
+{
+	unsigned long flags;
+	u32 val;
+
+	if (bit < 0 || bit >= INTR_BITS)
+		return;
+	spin_lock_irqsave(&w->svc_lock, flags);
+	val = readl(w->r4 + MBOX_INTMR0);
+	val = mask ? val | BIT(bit + 16) : val & ~BIT(bit + 16);
+	writel(val, w->r4 + MBOX_INTMR0);
+	spin_unlock_irqrestore(&w->svc_lock, flags);
+}
+
+void scsc_service_mifintrbit_bit_mask(struct scsc_service *svc, int bit)
+{
+	intmr0_update(svc->w, bit, true);
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_bit_mask);
+
+void scsc_service_mifintrbit_bit_unmask(struct scsc_service *svc, int bit)
+{
+	intmr0_update(svc->w, bit, false);
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_bit_unmask);
+
+void scsc_service_mifintrbit_bit_set(struct scsc_service *svc, int bit,
+				     enum scsc_mifintr_target dir)
+{
+	if (bit >= 0 && bit < INTR_BITS)
+		raise_bit(svc->w, dir == SCSC_MIFINTR_TARGET_M4 ? TARGET_M4 : TARGET_R4, bit);
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_bit_set);
+
+/* mifintrbit_alloc_tohost(): masked, cleared, registered, then unmasked */
+int scsc_service_mifintrbit_register_tohost(struct scsc_service *svc,
+					    scsc_mifintrbit_handler handler, void *data)
+{
+	struct zrn_wlbt *w = svc->w;
+	int bit;
+
+	mutex_lock(&w->lock);
+	bit = intr_alloc(&w->tohost_used, 0);
+	if (bit >= 0) {
+		intmr0_update(w, bit, true);
+		writel(BIT(bit + 16), w->r4 + MBOX_INTCR0);
+		w->tohost[bit].data = data;
+		WRITE_ONCE(w->tohost[bit].fn, handler);
+		intmr0_update(w, bit, false);
+	}
+	mutex_unlock(&w->lock);
+	return bit;
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_register_tohost);
+
+int scsc_service_mifintrbit_unregister_tohost(struct scsc_service *svc, int bit)
+{
+	struct zrn_wlbt *w = svc->w;
+
+	if (bit < 0 || bit >= INTR_BITS || (w->own_bits & BIT(bit)))
+		return -EINVAL;
+	mutex_lock(&w->lock);
+	intmr0_update(w, bit, true);
+	WRITE_ONCE(w->tohost[bit].fn, NULL);
+	synchronize_irq(w->mbox_irq);
+	w->tohost[bit].data = NULL;
+	writel(BIT(bit + 16), w->r4 + MBOX_INTCR0);
+	w->tohost_used &= ~BIT(bit);
+	mutex_unlock(&w->lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_unregister_tohost);
+
+int scsc_service_mifintrbit_alloc_fromhost(struct scsc_service *svc, enum scsc_mifintr_target dir)
+{
+	struct zrn_wlbt *w = svc->w;
+	int bit;
+
+	mutex_lock(&w->lock);
+	bit = intr_alloc(&w->fromhost_used[dir == SCSC_MIFINTR_TARGET_M4 ? TARGET_M4 : TARGET_R4], 1);
+	mutex_unlock(&w->lock);
+	return bit;
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_alloc_fromhost);
+
+int scsc_service_mifintrbit_free_fromhost(struct scsc_service *svc, int bit,
+					  enum scsc_mifintr_target dir)
+{
+	struct zrn_wlbt *w = svc->w;
+
+	if (bit <= 0 || bit >= INTR_BITS)
+		return -EINVAL;
+	mutex_lock(&w->lock);
+	w->fromhost_used[dir == SCSC_MIFINTR_TARGET_M4 ? TARGET_M4 : TARGET_R4] &= ~BIT(bit);
+	mutex_unlock(&w->lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsc_service_mifintrbit_free_fromhost);
+
+/*
+ * Configuration files, as mx140_file.c looks for them under the firmware
+ * directory: scsc/mx140/conf/<dir>/<file>, then the flat scsc/mx140_<file>
+ * (VENDOR's etc/wifi has the flat ones, e.g. mx140_wlan.hcf).
+ */
+int mx140_file_request_conf(struct scsc_mx *mx, const struct firmware **conf,
+			    const char *config_path, const char *filename)
+{
+	char path[128];
+	int ret;
+
+	snprintf(path, sizeof(path), "scsc/mx140/conf/%s/%s", config_path, filename);
+	ret = firmware_request_nowarn(conf, path, to_w(mx)->dev);
+	if (!ret)
+		return 0;
+	snprintf(path, sizeof(path), "scsc/mx140_%s", filename);
+	return firmware_request_nowarn(conf, path, to_w(mx)->dev);
+}
+EXPORT_SYMBOL_GPL(mx140_file_request_conf);
+
+/* per-device files (Samsung's /efs): none here */
+int mx140_file_request_device_conf(struct scsc_mx *mx, const struct firmware **conf,
+				   const char *config_path)
+{
+	return -ENOENT;
+}
+EXPORT_SYMBOL_GPL(mx140_file_request_device_conf);
+
+void mx140_file_release_conf(struct scsc_mx *mx, const struct firmware *conf)
+{
+	release_firmware(conf);
+}
+EXPORT_SYMBOL_GPL(mx140_file_release_conf);
+
+int mx140_request_file(struct scsc_mx *mx, char *path, const struct firmware **firmp)
+{
+	char name[128];
+
+	snprintf(name, sizeof(name), "scsc/%s", path);
+	return firmware_request_nowarn(firmp, name, to_w(mx)->dev);
+}
+EXPORT_SYMBOL_GPL(mx140_request_file);
+
+int mx140_release_file(struct scsc_mx *mx, const struct firmware *firmp)
+{
+	release_firmware(firmp);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mx140_release_file);
+
+int mx140_log_dump(void)
+{
+	return 0;
+}
+EXPORT_SYMBOL_GPL(mx140_log_dump);
+
+void mxman_get_fw_version(char *version, size_t ver_sz)
+{
+	snprintf(version, ver_sz, "%s", zrn_core && zrn_core->build_id[0] ?
+		 zrn_core->build_id : "unknown");
+}
+EXPORT_SYMBOL_GPL(mxman_get_fw_version);
+
+void mxman_get_driver_version(char *version, size_t ver_sz)
+{
+	snprintf(version, ver_sz, "zrn-wlbt");
+}
+EXPORT_SYMBOL_GPL(mxman_get_driver_version);
+
+bool mxman_recovery_disabled(void)
+{
+	return true;
+}
+EXPORT_SYMBOL_GPL(mxman_recovery_disabled);
+
+/* Samsung's /sys/wifi: not made here */
+struct kobject *mxman_wifi_kobject_ref_get(void)
+{
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(mxman_wifi_kobject_ref_get);
+
+void mxman_wifi_kobject_ref_put(void)
+{
+}
+EXPORT_SYMBOL_GPL(mxman_wifi_kobject_ref_put);
+
 static int zrn_wlbt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -707,7 +1251,11 @@ static int zrn_wlbt_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	w->dev = dev;
 	mutex_init(&w->lock);
+	mutex_init(&w->heap_lock);
 	spin_lock_init(&w->log_lock);
+	spin_lock_init(&w->svc_lock);
+	INIT_LIST_HEAD(&w->allocs);
+	INIT_LIST_HEAD(&w->services);
 	init_completion(&w->started);
 	init_completion(&w->halted);
 	platform_set_drvdata(pdev, w);
@@ -753,14 +1301,31 @@ static int zrn_wlbt_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	w->blocks = devm_bitmap_zalloc(dev, w->mem_size / HEAP_BLOCK, GFP_KERNEL);
+	if (!w->blocks)
+		return -ENOMEM;
+
 	dev_info(dev, "Maxwell window %pa, %zu MB; boot with: echo 1 > %s/boot\n",
 		 &w->mem_phys, w->mem_size >> 20, dev_name(dev));
+
+	/* the WLAN driver, if it was loaded first */
+	mutex_lock(&zrn_client_lock);
+	zrn_core = w;
+	if (zrn_client)
+		zrn_client->probe(zrn_client, to_mx(w), SCSC_MODULE_CLIENT_REASON_HW_PROBE);
+	mutex_unlock(&zrn_client_lock);
 	return 0;
 }
 
 static void zrn_wlbt_remove(struct platform_device *pdev)
 {
 	struct zrn_wlbt *w = platform_get_drvdata(pdev);
+
+	mutex_lock(&zrn_client_lock);
+	if (zrn_client)
+		zrn_client->remove(zrn_client, to_mx(w), SCSC_MODULE_CLIENT_REASON_HW_REMOVE);
+	zrn_core = NULL;
+	mutex_unlock(&zrn_client_lock);
 
 	mutex_lock(&w->lock);
 	if (w->running)

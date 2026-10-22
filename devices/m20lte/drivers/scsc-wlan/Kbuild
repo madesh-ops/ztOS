@@ -1,0 +1,17 @@
+# Samsung's SCSC WLAN driver (the S612's Wi-Fi), from its M20 kernel by way of
+# the Galaxy Tab A 10.1 2019 port (github.com/Mollomm1/linux-exynos7885, branch
+# gta3xl), built against Linux 7.1 on top of zrn-wlbt, which provides the SCSC
+# core interface (include/scsc/scsc_mx.h). Station mode only: none of the
+# Android extras (GScan, NAN), no KIC, no Wi-Fi logger.
+obj-m += scsc_wlan.o
+scsc_wlan-y := hip4.o mbulk.o dev.o cfg80211_ops.o netif.o rx.o tx.o ba.o \
+	sap_mlme.o sap_ma.o sap_dbg.o sap_test.o mib.o mib_text_convert.o \
+	debug.o debug_frame.o procfs.o mgt.o mlme.o udi.o log_clients.o \
+	src_sink.o fw_test.o cac.o scsc_wifi_fcq.o ioctl.o wakelock.o hip.o cm_if.o
+ccflags-y += -I$(src) -I$(src)/compat -I$(src)/include/scsc -I$(src)/include
+ccflags-y += -DCONFIG_SOC_EXYNOS7885 -DCONFIG_SCSC_WLAN_MAX_INTERFACES=3
+ccflags-y += -DCONFIG_SCSC_WLAN_WES_NCHO
+ccflags-y += -DCONFIG_SCSC_WLAN_MAC_ADDRESS_FILENAME=\"wlan/.mac.info\"
+ccflags-y += -DCONFIG_SCSC_WLAN_KEY_MGMT_OFFLOAD -DCONFIG_SCSC_WLAN_HIP_SUPPORT_SCATTER_GATHER_API
+# Samsung's code, in its own style
+ccflags-y += -Wno-missing-prototypes -Wno-missing-declarations -Wno-unused-variable
