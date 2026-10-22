@@ -899,12 +899,14 @@ ATTRIBUTE_GROUPS(zrn_wlbt);
 
 /*
  * Stage 3: the part of Samsung's SCSC core (include/scsc/scsc_mx.h) that its
- * WLAN driver (drivers/scsc-wlan) uses, on top of the boot above. A struct
+ * WLAN and Bluetooth drivers (drivers/scsc-wlan, drivers/scsc-bt) use, on top
+ * of the boot above. A struct
  * scsc_mx is this driver's struct zrn_wlbt. There is no recovery: a failed
  * firmware stays failed until its services are closed.
  */
 static struct zrn_wlbt *zrn_core;
-static struct scsc_mx_module_client *zrn_client;
+#define MAX_CLIENTS	4		/* WLAN, BT, and room */
+static struct scsc_mx_module_client *zrn_clients[MAX_CLIENTS];
 static DEFINE_MUTEX(zrn_client_lock);
 
 static struct zrn_wlbt *to_w(struct scsc_mx *mx)
@@ -919,12 +921,16 @@ static struct scsc_mx *to_mx(struct zrn_wlbt *w)
 
 int scsc_mx_module_register_client_module(struct scsc_mx_module_client *client)
 {
+	int i;
+
 	mutex_lock(&zrn_client_lock);
-	if (zrn_client) {
+	for (i = 0; i < MAX_CLIENTS && zrn_clients[i]; i++)
+		;
+	if (i == MAX_CLIENTS) {
 		mutex_unlock(&zrn_client_lock);
 		return -EBUSY;
 	}
-	zrn_client = client;
+	zrn_clients[i] = client;
 	if (zrn_core)
 		client->probe(client, to_mx(zrn_core), SCSC_MODULE_CLIENT_REASON_HW_PROBE);
 	mutex_unlock(&zrn_client_lock);
@@ -934,11 +940,15 @@ EXPORT_SYMBOL_GPL(scsc_mx_module_register_client_module);
 
 void scsc_mx_module_unregister_client_module(struct scsc_mx_module_client *client)
 {
+	int i;
+
 	mutex_lock(&zrn_client_lock);
-	if (zrn_client == client) {
+	for (i = 0; i < MAX_CLIENTS; i++) {
+		if (zrn_clients[i] != client)
+			continue;
 		if (zrn_core)
 			client->remove(client, to_mx(zrn_core), SCSC_MODULE_CLIENT_REASON_HW_REMOVE);
-		zrn_client = NULL;
+		zrn_clients[i] = NULL;
 	}
 	mutex_unlock(&zrn_client_lock);
 }
@@ -1056,6 +1066,25 @@ int scsc_mx_service_stop(struct scsc_service *svc)
 	return service_request(svc, SM_MSG_STOP_REQ, 0, &svc->stop_cfm);
 }
 EXPORT_SYMBOL_GPL(scsc_mx_service_stop);
+
+/* the BT-ABOX window, for Bluetooth audio offload: the M20 has none */
+int scsc_mx_service_get_abox_shared_mem(struct scsc_service *svc, void **data)
+{
+	*data = NULL;
+	return -ENODEV;
+}
+EXPORT_SYMBOL_GPL(scsc_mx_service_get_abox_shared_mem);
+
+/*
+ * Samsung panics the firmware to recover from a stuck service; there is no
+ * recovery here, and a panic would take Wi-Fi down with it: only say so.
+ */
+int scsc_service_force_panic(struct scsc_service *svc)
+{
+	dev_err(svc->w->dev, "service %d asked for a firmware panic (not done)\n", svc->id);
+	return -EOPNOTSUPP;
+}
+EXPORT_SYMBOL_GPL(scsc_service_force_panic);
 
 void scsc_mx_service_service_failed(struct scsc_service *svc, const char *reason)
 {
@@ -1320,7 +1349,7 @@ static int zrn_wlbt_probe(struct platform_device *pdev)
 	struct reserved_mem *rmem;
 	struct device_node *np;
 	struct zrn_wlbt *w;
-	int irq, ret;
+	int irq, ret, i;
 
 	w = devm_kzalloc(dev, sizeof(*w), GFP_KERNEL);
 	if (!w)
@@ -1384,11 +1413,13 @@ static int zrn_wlbt_probe(struct platform_device *pdev)
 	dev_info(dev, "Maxwell window %pa, %zu MB; boot with: echo 1 > %s/boot\n",
 		 &w->mem_phys, w->mem_size >> 20, dev_name(dev));
 
-	/* the WLAN driver, if it was loaded first */
+	/* the WLAN and BT drivers, if they were loaded first */
 	mutex_lock(&zrn_client_lock);
 	zrn_core = w;
-	if (zrn_client)
-		zrn_client->probe(zrn_client, to_mx(w), SCSC_MODULE_CLIENT_REASON_HW_PROBE);
+	for (i = 0; i < MAX_CLIENTS; i++)
+		if (zrn_clients[i])
+			zrn_clients[i]->probe(zrn_clients[i], to_mx(w),
+					      SCSC_MODULE_CLIENT_REASON_HW_PROBE);
 	mutex_unlock(&zrn_client_lock);
 	return 0;
 }
@@ -1397,9 +1428,13 @@ static void zrn_wlbt_remove(struct platform_device *pdev)
 {
 	struct zrn_wlbt *w = platform_get_drvdata(pdev);
 
+	int i;
+
 	mutex_lock(&zrn_client_lock);
-	if (zrn_client)
-		zrn_client->remove(zrn_client, to_mx(w), SCSC_MODULE_CLIENT_REASON_HW_REMOVE);
+	for (i = 0; i < MAX_CLIENTS; i++)
+		if (zrn_clients[i])
+			zrn_clients[i]->remove(zrn_clients[i], to_mx(w),
+					       SCSC_MODULE_CLIENT_REASON_HW_REMOVE);
 	zrn_core = NULL;
 	mutex_unlock(&zrn_client_lock);
 

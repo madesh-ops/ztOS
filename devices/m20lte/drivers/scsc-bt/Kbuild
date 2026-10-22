@@ -1,0 +1,12 @@
+# Samsung's SCSC Bluetooth driver (the S612's Bluetooth, on the subsystem's
+# M4), from its M20 kernel by way of the Galaxy Tab A 10.1 2019 port
+# (github.com/Mollomm1/linux-exynos7885, branch gta3xl), built against Linux
+# 7.1 on top of zrn-wlbt (the SCSC core interface) with its BlueZ bridge, an
+# hci_dev, instead of Samsung's H4 character device. No ANT.
+obj-m += scsc_bt.o
+scsc_bt-y := scsc_bt_module.o scsc_shm.o scsc_avdtp_detect.o scsc_bluez.o
+ccflags-y += -I$(src) -I$(src)/../scsc-wlan/compat -I$(src)/../scsc-wlan/include/scsc
+ccflags-y += -I$(src)/../scsc-wlan/include -I$(src)/../scsc-wlan
+ccflags-y += -DCONFIG_SOC_EXYNOS7885 -DCONFIG_SCSC_BT_BLUEZ
+# Samsung's code, in its own style
+ccflags-y += -Wno-missing-prototypes -Wno-missing-declarations -Wno-unused-variable

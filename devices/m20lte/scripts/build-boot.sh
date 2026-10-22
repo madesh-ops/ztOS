@@ -112,8 +112,8 @@ cd "$SRC"
 [ -f out/.config ] || make -s O=out defconfig
 cfg() { ./scripts/config --file out/.config "$@"; }
 # Other SoCs, and whole subsystems this phone has nothing of (or nothing a
-# mainline driver exists for yet: PCIe, sound). Wi-Fi is cfg80211 below and
-# drivers/scsc-wlan.
+# mainline driver exists for yet: PCIe, sound). Wi-Fi and Bluetooth are cfg80211
+# and BT below, with drivers/scsc-wlan and drivers/scsc-bt.
 for sym in ARCH_ACTIONS ARCH_AIROHA ARCH_SUNXI ARCH_ALPINE ARCH_APPLE ARCH_BCM \
 	ARCH_BCM2835 ARCH_BCMBCA ARCH_BRCMSTB ARCH_BERLIN ARCH_BLAIZE ARCH_EXYNOSAUTOV9 \
 	ARCH_SPARX5 ARCH_K3 ARCH_LG1K ARCH_HISI ARCH_KEEMBAY ARCH_MEDIATEK ARCH_MESON \
@@ -126,7 +126,7 @@ for sym in ARCH_ACTIONS ARCH_AIROHA ARCH_SUNXI ARCH_ALPINE ARCH_APPLE ARCH_BCM \
 	VIRTIO_MENU INFINIBAND MTD ATA MD NVME_CORE SCSI_LOWLEVEL \
 	ETHERNET WWAN USB_NET_DRIVERS PHYLIB \
 	INPUT_JOYSTICK INPUT_TABLET W1 FUSION FIREWIRE MACINTOSH_DRIVERS \
-	BT CAN NFC RFKILL \
+	CAN NFC RFKILL \
 	BTRFS_FS XFS_FS GFS2_FS OCFS2_FS JFS_FS NTFS3_FS EROFS_FS SQUASHFS \
 	NFS_FS NFSD CIFS CEPH_FS 9P_FS CODA_FS AFS_FS ORANGEFS_FS \
 	DRM_AMDGPU DRM_NOUVEAU DRM_I915 DRM_RADEON DRM_MSM DRM_ETNAVIV DRM_ROCKCHIP \
@@ -169,7 +169,8 @@ for sym in BLK_DEV_INITRD ARCH_EXYNOS PINCTRL_EXYNOS PINCTRL_SAMSUNG EXYNOS_PMU 
 	MAGIC_SYSRQ DEVMEM MODULES MODULE_UNLOAD ARM64_VA_BITS_48 ARM64_PA_BITS_48 \
 	CMDLINE_FORCE NETFILTER CGROUPS NAMESPACES FHANDLE AUTOFS_FS SECCOMP \
 	INOTIFY_USER SIGNALFD SECURITY_LANDLOCK TIMERFD EPOLL UNIX INET IPV6 PACKET TUN \
-	ZRAM FUSE_FS WIRELESS CFG80211; do
+	ZRAM FUSE_FS WIRELESS CFG80211 \
+	BT BT_BREDR BT_LE BT_RFCOMM BT_HIDP BT_BNEP CRYPTO_AES CRYPTO_CMAC; do
 	cfg --enable "$sym"
 done
 # USB is a device here, never a host: dual-role needs the S2MU004's cable
@@ -233,7 +234,7 @@ make -s -C "$SRC" O="$SRC/out" M="$DEV/drivers" modules > "$B/modules-m20lte-bui
 	exit 1
 }
 cp out/drivers/firmware/samsung/acpm-protocol.ko "$DEV/drivers/"
-cp "$DEV/drivers/scsc-wlan/scsc_wlan.ko" "$DEV/drivers/"
+cp "$DEV/drivers/scsc-wlan/scsc_wlan.ko" "$DEV/drivers/scsc-bt/scsc_bt.ko" "$DEV/drivers/"
 ls -l "$DEV"/drivers/*.ko
 
 echo "=== uniLoader ==="

@@ -16,3 +16,6 @@ loupe
 foliate
 celluloid
 newsflash
+# Bluetooth (devices/m20lte/drivers/scsc-bt makes the hci_dev)
+bluez
+bluez-utils
