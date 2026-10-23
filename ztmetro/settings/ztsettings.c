@@ -9,8 +9,11 @@
  * for the phone it runs on (PHONES: the Galaxy S9, the default, and the M20).
  */
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
 #include <linux/input-event-codes.h>
 #include <math.h>
 #include <signal.h>
@@ -52,6 +55,7 @@ enum page {
 	PAGE_ABOUT,
 	PAGE_PERF,
 	PAGE_DEV,
+	PAGE_REMOTE,	/* remote control: the screen for a VNC viewer */
 	PAGE_APPS,	/* the second tab of the hub */
 	PAGE_HAPTICS,
 	PAGE_QUICK,
@@ -126,6 +130,8 @@ enum action {
 	ACT_DEV_TOUCHES,
 	ACT_DEV_LOCK,
 	ACT_DEV_OPEN_TEST,
+	ACT_REMOTE_SWITCH,
+	ACT_REMOTE_PASSWORD,	/* a new one */
 	ACT_HAPTIC_STRENGTH,
 	ACT_HAPTIC_GROUP,	/* a slider each: this + 1000 * its index into HAPTIC_GROUPS */
 	ACT_HAPTIC_TRY,		/* arg: which pulse */
@@ -943,6 +949,84 @@ static double draw_main(cairo_t *cr) {
 	return y + 20;
 }
 
+/* ---- remote control: the screen for a VNC viewer ------------------------------ */
+
+/* wayvnc, run by the ztos-remote user service (os/overlay/usr/local/bin/
+ * ztos-remote): its control socket is there while it runs */
+static bool remote_running(void) {
+	char path[256];
+	const char *rt = getenv("XDG_RUNTIME_DIR");
+	snprintf(path, sizeof(path), "%s/wayvncctl", rt ? rt : "/tmp");
+	return access(path, F_OK) == 0;
+}
+
+/* The password ztos-remote made, from wayvnc's config; "" before the first run */
+static void remote_password(char *out, size_t size) {
+	char path[512], line[160];
+	const char *home = getenv("HOME");
+	snprintf(path, sizeof(path), "%s/.config/wayvnc/config", home ? home : "");
+	out[0] = 0;
+	FILE *f = fopen(path, "r");
+	while (f && fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "password=", 9) == 0) {
+			line[strcspn(line, "\n")] = 0;
+			snprintf(out, size, "%s", line + 9);
+		}
+	}
+	if (f) {
+		fclose(f);
+	}
+}
+
+/* Where a viewer finds the phone: its addresses on Wi-Fi and over USB */
+static void remote_addresses(char *out, size_t size) {
+	struct ifaddrs *ifs, *i;
+	size_t n = 0;
+	out[0] = 0;
+	if (getifaddrs(&ifs) != 0) {
+		return;
+	}
+	for (i = ifs; i; i = i->ifa_next) {
+		if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || strcmp(i->ifa_name, "lo") == 0) {
+			continue;
+		}
+		char ip[INET_ADDRSTRLEN];
+		inet_ntop(AF_INET, &((struct sockaddr_in *)i->ifa_addr)->sin_addr, ip, sizeof(ip));
+		n += snprintf(out + n, n < size ? size - n : 0, "%s%s:5900 (%s)", n ? "\n" : "", ip,
+			strncmp(i->ifa_name, "wl", 2) == 0 ? "Wi-Fi" :
+			strncmp(i->ifa_name, "usb", 3) == 0 ? "USB" : i->ifa_name);
+	}
+	freeifaddrs(ifs);
+}
+
+static double draw_remote(cairo_t *cr) {
+	double y = zmc_header(cr, "remote control");
+	bool on = remote_running();
+	y = zmc_switch(cr, y, "Remote control", on, ACT_REMOTE_SWITCH);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, on ?
+		"A computer on the same network can see the screen and use it: "
+		"the mouse taps and drags, the keyboard types. Connect with a VNC viewer "
+		"that has RSA-AES encryption, such as TigerVNC 1.13 or later or RealVNC Viewer." :
+		"Lets a computer on the same network see the screen and use it, "
+		"through a VNC viewer. Off, nothing listens.",
+		FONT_REGULAR, 13, MARGIN, y, zmc.width - 2 * MARGIN) + 20;
+	if (on) {
+		char addrs[256], pw[64];
+		remote_addresses(addrs, sizeof(addrs));
+		remote_password(pw, sizeof(pw));
+		y = zmc_field(cr, y, "Address", addrs[0] ? addrs : "no network");
+		y = zmc_field(cr, y, "User name", "ztos");
+		y = zmc_field(cr, y, "Password", pw[0] ? pw : "(being made)");
+		y = zmc_button(cr, MARGIN, y + 4, 180, "new password", ACT_REMOTE_PASSWORD, 0);
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		y += zmc_text(cr, "Anyone with this password and on the same network can control the phone. "
+			"A new password disconnects whoever is connected.",
+			FONT_REGULAR, 13, MARGIN, y, zmc.width - 2 * MARGIN);
+	}
+	return y + 20;
+}
+
 /* The hub's second tab: what belongs to the system's own programs. */
 static double draw_apps(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "applications", "system", ACT_OPEN_PAGE, PAGE_MAIN);
@@ -954,6 +1038,10 @@ static double draw_apps(cairo_t *cr) {
 	snprintf(detail, sizeof(detail), "%s, low power when off: %s", profiles[app.perf_profile],
 		app.perf_deepsleep ? "on" : "off");
 	y = zmc_entry(cr, y, "performance", detail, ACT_OPEN_PAGE, PAGE_PERF);
+
+	y = zmc_entry(cr, y, "remote control",
+		remote_running() ? "on: a computer can see and use the screen" : "off",
+		ACT_OPEN_PAGE, PAGE_REMOTE);
 
 	y = zmc_entry(cr, y, "developer tests", "demo tiles, slow motion, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
 
@@ -2343,6 +2431,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_DATE: return draw_date(cr);
 	case PAGE_PERF: return draw_perf(cr);
 	case PAGE_DEV: return draw_dev(cr);
+	case PAGE_REMOTE: return draw_remote(cr);
 	case PAGE_MAIN: return draw_main(cr);
 	case PAGE_APPS: return draw_apps(cr);
 	case PAGE_THEME: return draw_theme(cr);
@@ -2713,6 +2802,22 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_DEV_OPEN_TEST:
 		if (system("zrndevtest >/dev/null 2>&1 &") != 0) {}
+		break;
+	case ACT_REMOTE_SWITCH: {
+		/* enabled, it comes back at the next login too */
+		bool want = !remote_running();
+		if (system(want ?
+			"systemctl --user enable --now ztos-remote >/dev/null 2>&1" :
+			"systemctl --user disable --now ztos-remote >/dev/null 2>&1") != 0) {}
+		/* wayvnc takes a moment to put up its socket (or take it down) */
+		for (int i = 0; i < 20 && remote_running() != want; i++) {
+			usleep(100 * 1000);
+		}
+		break;
+	}
+	case ACT_REMOTE_PASSWORD:
+		if (system("ztos-remote --password && "
+			"systemctl --user try-restart ztos-remote >/dev/null 2>&1") != 0) {}
 		break;
 	case ACT_BRIGHTNESS_STEP:
 		app.brightness = (app.brightness >= 100) ? 25 : app.brightness + 25;
@@ -3092,7 +3197,7 @@ static const struct { const char *name; enum page page; } pages[] = {
 	{ "wifi", PAGE_WIFI }, { "bluetooth", PAGE_BLUETOOTH }, { "mobile", PAGE_MOBILE }, { "audio", PAGE_AUDIO },
 	{ "battery", PAGE_BATTERY }, { "cpu", PAGE_CPU }, { "vm", PAGE_VM },
 	{ "gpu", PAGE_GPU }, { "keyboard", PAGE_KEYBOARD }, { "about", PAGE_ABOUT },
-	{ "perf", PAGE_PERF }, { "dev", PAGE_DEV }, { "haptics", PAGE_HAPTICS }, { "quick", PAGE_QUICK }, { "apn", PAGE_APN }, { "wifijoin", PAGE_WIFI_JOIN }, { "wifinet", PAGE_WIFI_NET },
+	{ "perf", PAGE_PERF }, { "dev", PAGE_DEV }, { "remote", PAGE_REMOTE },{ "haptics", PAGE_HAPTICS }, { "quick", PAGE_QUICK }, { "apn", PAGE_APN }, { "wifijoin", PAGE_WIFI_JOIN }, { "wifinet", PAGE_WIFI_NET },
 };
 
 static int page_named(const char *name) {

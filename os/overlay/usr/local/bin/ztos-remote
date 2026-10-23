@@ -1,0 +1,39 @@
+#!/bin/sh
+# Remote control: the phone's screen, and its touch as a mouse and keyboard,
+# for a VNC viewer on another computer (wayvnc, port 5900). Settings > remote
+# control switches it, as the ztos-remote user service.
+#
+# Encrypted (RSA-AES: TigerVNC 1.13 or later, RealVNC Viewer) and behind a
+# password of its own, made the first time, not the phone's login. The
+# shell lets wayvnc alone make the virtual pointer and keyboard.
+#
+#   ztos-remote             run it (the service does)
+#   ztos-remote --password  make a new password (then restart the service)
+dir=${XDG_CONFIG_HOME:-$HOME/.config}/wayvnc
+conf=$dir/config
+umask 077
+mkdir -p "$dir"
+
+new_password() {
+	tr -dc 'abcdefghjkmnpqrstuvwxyz23456789' < /dev/urandom | head -c 10
+}
+
+if [ ! -f "$dir/rsa_key.pem" ]; then
+	ssh-keygen -q -m pem -t rsa -b 2048 -N "" -C "ztos remote control" -f "$dir/rsa_key.pem" || exit 1
+	rm -f "$dir/rsa_key.pem.pub"
+fi
+if [ ! -f "$conf" ] || [ "$1" = --password ]; then
+	cat > "$conf" <<EOF
+address=0.0.0.0
+port=5900
+enable_auth=true
+username=ztos
+password=$(new_password)
+rsa_private_key_file=$dir/rsa_key.pem
+EOF
+fi
+[ "$1" = --password ] && exit 0
+
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
+exec wayvnc --config "$conf"

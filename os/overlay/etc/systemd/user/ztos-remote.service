@@ -1,0 +1,12 @@
+# Remote control (Settings > remote control): wayvnc, through ztos-remote.
+# It waits for the shell's display, so it can be enabled for every login.
+[Unit]
+Description=Remote control of the screen (wayvnc)
+
+[Service]
+ExecStart=/usr/local/bin/ztos-remote
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

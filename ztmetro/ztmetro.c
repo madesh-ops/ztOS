@@ -79,6 +79,8 @@
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_text_input_v3.h>
 #include <wlr/types/wlr_screencopy_v1.h>
+#include <wlr/types/wlr_virtual_keyboard_v1.h>
+#include <wlr/types/wlr_virtual_pointer_v1.h>
 #include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_touch.h>
 #include <wlr/types/wlr_viewporter.h>
@@ -760,6 +762,7 @@ struct zt_server {
 
 	struct wl_listener new_output, new_input, new_xdg_toplevel, new_xdg_popup,
 		new_decoration, new_text_input, new_surface, request_set_selection;
+	struct wl_listener new_virtual_pointer, new_virtual_keyboard;	/* remote control */
 };
 
 static void auth_input(struct zt_server *, uint32_t, const char *);
@@ -9457,9 +9460,48 @@ static void set_default_keymap(struct wlr_keyboard *keyboard) {
 	xkb_context_unref(context);
 }
 
+static void server_add_input(struct zt_server *server, struct wlr_input_device *device);
+
 static void server_new_input(struct wl_listener *listener, void *data) {
 	struct zt_server *server = wl_container_of(listener, server, new_input);
-	struct wlr_input_device *device = data;
+	server_add_input(server, data);
+}
+
+/* Remote control (Settings > remote control, wayvnc): the VNC viewer's
+ * pointer and keyboard come as virtual devices, handled as the real ones */
+static void new_virtual_pointer(struct wl_listener *listener, void *data) {
+	struct zt_server *server = wl_container_of(listener, server, new_virtual_pointer);
+	struct wlr_virtual_pointer_v1_new_pointer_event *event = data;
+	server_add_input(server, &event->new_pointer->pointer.base);
+}
+
+static void new_virtual_keyboard(struct wl_listener *listener, void *data) {
+	struct zt_server *server = wl_container_of(listener, server, new_virtual_keyboard);
+	struct wlr_virtual_keyboard_v1 *keyboard = data;
+	server_add_input(server, &keyboard->keyboard.base);
+}
+
+/* Who may make virtual input devices: wayvnc only. Any other client could
+ * tap and type as the user. */
+static bool global_filter(const struct wl_client *client, const struct wl_global *global, void *data) {
+	const char *name = wl_global_get_interface(global)->name;
+	if (strcmp(name, "zwlr_virtual_pointer_manager_v1") != 0 &&
+	    strcmp(name, "zwp_virtual_keyboard_manager_v1") != 0) {
+		return true;
+	}
+	pid_t pid;
+	char link[64], exe[PATH_MAX];
+	wl_client_get_credentials((struct wl_client *)client, &pid, NULL, NULL);
+	snprintf(link, sizeof(link), "/proc/%d/exe", (int)pid);
+	ssize_t n = readlink(link, exe, sizeof(exe) - 1);
+	if (n <= 0) {
+		return false;
+	}
+	exe[n] = 0;
+	return strcmp(exe, "/usr/bin/wayvnc") == 0;
+}
+
+static void server_add_input(struct zt_server *server, struct wlr_input_device *device) {
 	if (device->type == WLR_INPUT_DEVICE_TOUCH) {
 		struct zt_touch_device *touch = calloc(1, sizeof(*touch));
 		touch->server = server;
@@ -9493,7 +9535,9 @@ static void server_new_input(struct wl_listener *listener, void *data) {
 		struct zt_keyboard *keyboard = calloc(1, sizeof(*keyboard));
 		keyboard->server = server;
 		keyboard->wlr_keyboard = wlr_keyboard;
-		set_default_keymap(wlr_keyboard);
+		if (!wlr_input_device_get_virtual_keyboard(device)) {
+			set_default_keymap(wlr_keyboard);	/* (a virtual one brings its own) */
+		}
 		wlr_keyboard_set_repeat_info(wlr_keyboard, 25, 600);
 		keyboard->modifiers.notify = keyboard_handle_modifiers;
 		wl_signal_add(&wlr_keyboard->events.modifiers, &keyboard->modifiers);
@@ -10861,6 +10905,15 @@ int main(int argc, char *argv[]) {
 	wl_signal_add(&server.deco_mgr->events.new_toplevel_decoration, &server.new_decoration);
 	/* screenshots (grim): how the shell's look is checked on the phone */
 	wlr_screencopy_manager_v1_create(server.wl_display);
+	/* remote control: wayvnc's pointer and keyboard (global_filter keeps
+	 * these two to wayvnc) */
+	wl_display_set_global_filter(server.wl_display, global_filter, NULL);
+	struct wlr_virtual_pointer_manager_v1 *vptr = wlr_virtual_pointer_manager_v1_create(server.wl_display);
+	server.new_virtual_pointer.notify = new_virtual_pointer;
+	wl_signal_add(&vptr->events.new_virtual_pointer, &server.new_virtual_pointer);
+	struct wlr_virtual_keyboard_manager_v1 *vkbd = wlr_virtual_keyboard_manager_v1_create(server.wl_display);
+	server.new_virtual_keyboard.notify = new_virtual_keyboard;
+	wl_signal_add(&vkbd->events.new_virtual_keyboard, &server.new_virtual_keyboard);
 	wlr_xdg_output_manager_v1_create(server.wl_display, server.output_layout);
 	server.text_input_mgr = wlr_text_input_manager_v3_create(server.wl_display);
 	server.new_text_input.notify = server_new_text_input;

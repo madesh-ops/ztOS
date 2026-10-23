@@ -21,3 +21,5 @@ bluez
 bluez-utils
 # A browser made for phones (GNOME Web: adaptive, address bar at the bottom)
 epiphany
+# Remote control (Settings > remote control): the screen for a VNC viewer
+wayvnc
