@@ -1,0 +1,9 @@
+#!/bin/sh
+# GNOME Web on the M20. WebKit draws on the CPU: its GPU path crashes the
+# web process on this Mali-G71 (as Firefox and GTK4 render in software too).
+# And it goes straight out over Wi-Fi, not through /etc/environment's USB
+# proxy, which is only there while the phone is tethered to a computer.
+export WEBKIT_SKIA_ENABLE_CPU_RENDERING=1
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+unset all_proxy ALL_PROXY
+exec /usr/bin/epiphany "$@"

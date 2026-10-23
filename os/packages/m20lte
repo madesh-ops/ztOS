@@ -19,3 +19,7 @@ newsflash
 # Bluetooth (devices/m20lte/drivers/scsc-bt makes the hci_dev)
 bluez
 bluez-utils
+# A browser made for phones (GNOME Web: adaptive, address bar at the bottom);
+# devices/m20lte/rootfs/overlay/usr/local/bin/epiphany starts it in software
+# and off the USB proxy
+epiphany
