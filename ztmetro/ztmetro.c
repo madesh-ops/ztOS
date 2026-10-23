@@ -10469,10 +10469,36 @@ static void server_new_output(struct wl_listener *listener, void *data) {
 	wl_event_source_timer_update(server->boot_check_timer, 100);
 }
 
+/* How often the app on show sends frames while it keeps sending them (a list
+ * it scrolls): logged at the end of each run, as "animation:" is for the
+ * shell's own */
+static void app_frames_count(struct zt_server *server) {
+	static uint32_t first, last, frames, worst;
+	uint32_t now = now_ms();
+	if (frames > 0 && now - last > 100) {
+		if (frames > 10) {
+			wlr_log(WLR_INFO, "app frames: %u in %u ms (%.1f ms each, worst %u ms)",
+				frames, last - first, (float)(last - first) / (frames - 1), worst);
+		}
+		frames = 0;
+	}
+	if (frames == 0) {
+		first = now;
+		worst = 0;
+	} else if (now - last > worst) {
+		worst = now - last;
+	}
+	frames++;
+	last = now;
+}
+
 static void surface_commit(struct wl_listener *listener, void *data) {
 	struct zt_surface *zs = wl_container_of(listener, zs, commit);
 	if (zs->server->shown || zs->server->leaving) {
 		damage(zs->server);
+		if (zs->server->shown && zs->surface == zs->server->shown->xdg_toplevel->base->surface) {
+			app_frames_count(zs->server);
+		}
 	}
 }
 
