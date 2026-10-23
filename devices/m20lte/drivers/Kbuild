@@ -3,6 +3,7 @@ obj-m += zrn-s2mu004-fg.o
 obj-m += zrn-wlbt.o
 obj-m += zrn-acpm-mbox.o
 obj-m += zrn-s2mpu08-g3d.o
+obj-m += zrn-cpufreq.o
 obj-m += scsc-wlan/
 CFLAGS_zrn-wlbt.o += -I$(src)/scsc-wlan/include
 obj-m += scsc-bt/

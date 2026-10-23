@@ -184,6 +184,12 @@ cfg --disable USB_DWC3_DUAL_ROLE
 # connected (whatever then asks the old interface); the build keeps its
 # .config, so it is switched off explicitly.
 cfg --disable CFG80211_WEXT
+# CPU frequency scaling (devices/m20lte/drivers/zrn-cpufreq.c), driven by
+# schedutil from the scheduler's load; cpu-thermal throttles it.
+for sym in CPU_FREQ CPU_FREQ_STAT CPU_FREQ_GOV_SCHEDUTIL CPU_FREQ_GOV_PERFORMANCE \
+	CPU_FREQ_GOV_POWERSAVE CPU_FREQ_GOV_USERSPACE CPU_FREQ_DEFAULT_GOV_SCHEDUTIL; do
+	cfg --enable "$sym"
+done
 if [ -n "$WDT" ]; then
 	cfg --enable WATCHDOG
 	cfg --enable WATCHDOG_SYSFS

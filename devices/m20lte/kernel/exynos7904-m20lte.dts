@@ -285,8 +285,12 @@
 	/*
 	 * Samsung's G3D zone throttles from 76 C (exynos7885.dtsi: G3D's
 	 * trips), its devfreq step by step here; 115 C is critical, as in the
-	 * Galaxy Tab A 10.1 2019 port. The CPUs have no cpufreq in this
-	 * build (CPU_FREQ is off), so their zone only shuts down at 115 C.
+	 * Galaxy Tab A 10.1 2019 port. The CPU zone does the same from 76 C,
+	 * Samsung's first BIG/LITTLE_THERMAL step: zrn-cpufreq's two domains
+	 * lower their highest level step by step while it stays hot. That alone
+	 * let all eight cores at full load creep up to 90 C, so from Samsung's
+	 * 86 and 96 C steps the domains are held at least three levels down
+	 * (A53 1248, A73 1352 MHz) and then five (1014 and 936 MHz).
 	 */
 	thermal-zones {
 		cpu-thermal {
@@ -295,10 +299,48 @@
 			thermal-sensors = <&tmu_cpu>;
 
 			trips {
+				cpu_alert0: cpu-alert0 {
+					temperature = <76000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				cpu_alert1: cpu-alert1 {
+					temperature = <86000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				cpu_alert2: cpu-alert2 {
+					temperature = <96000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
 				cpu-crit {
 					temperature = <115000>;
 					hysteresis = <0>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu_alert0>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+
+				map1 {
+					trip = <&cpu_alert1>;
+					cooling-device = <&cpu0 3 THERMAL_NO_LIMIT>,
+							 <&cpu6 3 THERMAL_NO_LIMIT>;
+				};
+
+				map2 {
+					trip = <&cpu_alert2>;
+					cooling-device = <&cpu0 5 THERMAL_NO_LIMIT>,
+							 <&cpu6 5 THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -350,6 +392,20 @@
 		regulator-name = "vdd_g3d";
 		regulator-min-microvolt = <600000>;
 		regulator-max-microvolt = <762500>;
+	};
+
+	/*
+	 * CPU frequency scaling (devices/m20lte/drivers/zrn-cpufreq.c): the
+	 * cluster CMUs whose PLLs it sets, A53s first (CMU_CPUCL1 for CPUs 0-3,
+	 * CMU_CPUCL2 for 4-5), then the A73s' CMU_CPUCL0; their supplies
+	 * (BUCK3, BUCK2) over ACPM channel 2.
+	 */
+	cpufreq@10800000 {
+		compatible = "zrn,m20-cpufreq";
+		reg = <0x0 0x10800000 0x2000>,
+		      <0x0 0x10a00000 0x2000>,
+		      <0x0 0x10900000 0x2000>;
+		samsung,acpm-ipc = <&acpm_ipc 2>;
 	};
 
 	/*
@@ -762,16 +818,17 @@
  * How fast each core is for its clock, so the scheduler puts the busy threads
  * (a browser's main thread, ztMETRO) on the two Cortex-A73s rather than on any
  * of the six Cortex-A53s: without these every core counts 1024 alike. The
- * values are mainline's for the same pair of cores (hi3660.dtsi).
+ * values are mainline's for the same pair of cores (hi3660.dtsi). Each core
+ * can be a cooling device: cpu-thermal throttles its cpufreq domain.
  */
-&cpu0 { capacity-dmips-mhz = <592>; };
-&cpu1 { capacity-dmips-mhz = <592>; };
-&cpu2 { capacity-dmips-mhz = <592>; };
-&cpu3 { capacity-dmips-mhz = <592>; };
-&cpu4 { capacity-dmips-mhz = <592>; };
-&cpu5 { capacity-dmips-mhz = <592>; };
-&cpu6 { capacity-dmips-mhz = <1024>; };
-&cpu7 { capacity-dmips-mhz = <1024>; };
+&cpu0 { capacity-dmips-mhz = <592>; #cooling-cells = <2>; };
+&cpu1 { capacity-dmips-mhz = <592>; #cooling-cells = <2>; };
+&cpu2 { capacity-dmips-mhz = <592>; #cooling-cells = <2>; };
+&cpu3 { capacity-dmips-mhz = <592>; #cooling-cells = <2>; };
+&cpu4 { capacity-dmips-mhz = <592>; #cooling-cells = <2>; };
+&cpu5 { capacity-dmips-mhz = <592>; #cooling-cells = <2>; };
+&cpu6 { capacity-dmips-mhz = <1024>; #cooling-cells = <2>; };
+&cpu7 { capacity-dmips-mhz = <1024>; #cooling-cells = <2>; };
 
 /* i2c_6: the motion sensors (exynos7904-m20lte-sensor-r03.dtsi). The
  * board has an LSM6DSL or a LIS2DS(12) depending on the batch (this one has
