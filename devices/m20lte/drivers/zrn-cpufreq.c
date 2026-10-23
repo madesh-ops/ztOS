@@ -240,6 +240,14 @@ static int zrn_init(struct cpufreq_policy *policy)
 	policy->driver_data = d;
 	policy->freq_table = d->table;
 	policy->cpuinfo.transition_latency = 300 * NSEC_PER_USEC;
+	/*
+	 * A change costs an ACPM message to the PMIC and a PLL restart with its
+	 * cluster parked on the oscillator, interrupts off. schedutil's default
+	 * from the latency, 450 us, made the A53s change about 100 times a
+	 * second at light load, the stalls showing as jank; 10 ms makes it
+	 * about 14.
+	 */
+	policy->transition_delay_us = 10 * USEC_PER_MSEC;
 	cpumask_copy(policy->cpus, d->mask);
 	return 0;
 }

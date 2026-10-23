@@ -430,6 +430,8 @@ struct zt_output {
 	 * been handed over, and handed over itself when that one is on the
 	 * screen: the GPU draws while the display copies (see output_frame) */
 	struct wlr_buffer *ahead;
+	bool in_flight;		/* a frame handed over, its frame event still to come */
+	struct wl_event_source *ahead_idle;	/* draw ahead for damage meanwhile */
 };
 
 struct zt_server {
@@ -773,10 +775,31 @@ static uint32_t now_ms(void) {
 
 /* ---- renderer: animation, matrices, textured quads ------------------------ */
 
+static void render_frame(struct zt_server *server, bool show);
+
+/* Damage while a frame is still with the display: draw the next one now,
+ * not once that frame is up, so an app's new frames (a list it scrolls)
+ * go up a frame apart as the shell's own animations do (output_frame) */
+static void draw_ahead_idle(void *data) {
+	struct zt_server *server = data;
+	struct zt_output *out = server->output;
+	if (!out) {
+		return;
+	}
+	out->ahead_idle = NULL;
+	if (out->in_flight && !out->ahead && server->screen_on && server->dirty) {
+		render_frame(server, false);
+	}
+}
+
 static void damage(struct zt_server *server) {
 	server->dirty = true;
 	if (server->output && server->screen_on) {
-		wlr_output_schedule_frame(server->output->wlr_output);
+		struct zt_output *out = server->output;
+		wlr_output_schedule_frame(out->wlr_output);
+		if (out->in_flight && !out->ahead && !out->ahead_idle) {
+			out->ahead_idle = wl_event_loop_add_idle(server->loop, draw_ahead_idle, server);
+		}
 	}
 }
 
@@ -9746,6 +9769,7 @@ static bool commit_ahead(struct zt_server *server) {
 	bool ok = wlr_output_commit_state(out->wlr_output, &state);
 	if (ok) {
 		out->last_submitted = buffer;
+		out->in_flight = true;
 	} else {
 		wlr_log(WLR_ERROR, "output commit failed (frame drawn ahead)");
 	}
@@ -10250,6 +10274,7 @@ static void render_frame(struct zt_server *server, bool show) {
 			wlr_log(WLR_ERROR, "output commit failed");
 		} else {
 			server->output->last_submitted = buffer;
+			server->output->in_flight = true;
 		}
 	} else {
 		drop_ahead(server->output);
@@ -10328,6 +10353,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
 	 * come round (patch-kernel.py): drawn only then, every frame took the
 	 * drawing plus that wait plus the copy, 23-33 ms; drawn ahead, the GPU
 	 * works while the display waits and copies. */
+	output->in_flight = false;	/* (a frame event also comes when nothing was) */
 	bool shown = commit_ahead(server);
 	/* nothing damaged and nothing moving: no frame, and no further wake-ups */
 	if (!(server->dirty || server->moving || loading_active(server) || animating(server, NULL))) {
@@ -10337,8 +10363,9 @@ static void output_frame(struct wl_listener *listener, void *data) {
 		/* the first frame after a rest goes straight up, with no delay */
 		render_frame(server, true);
 	}
-	/* and while things move, the next one is drawn now, during the copy */
-	if (server->moving || loading_active(server) || animating(server, NULL)) {
+	/* and while things move, or an app keeps sending frames, the next one
+	 * is drawn now, during the copy (damage() does the same as it comes) */
+	if (server->dirty || server->moving || loading_active(server) || animating(server, NULL)) {
 		render_frame(server, false);
 	}
 }
@@ -10355,6 +10382,9 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
 	drop_ahead(output);
+	if (output->ahead_idle) {
+		wl_event_source_remove(output->ahead_idle);
+	}
 	if (output->server->output == output) {
 		output->server->output = NULL;
 	}
