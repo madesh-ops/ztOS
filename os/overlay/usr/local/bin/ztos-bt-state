@@ -1,23 +1,41 @@
-#!/bin/sh
-# Bluetooth, as the shell shows it: every 2 s, into $XDG_RUNTIME_DIR/ztos-bt,
+#!/bin/bash
+# Bluetooth, as the shell shows it, into $XDG_RUNTIME_DIR/ztos-bt,
 #   on=0|1  connected=NAME  battery=PERCENT  streaming=0|1
 # (the status bar's icon), and the Settings tile's live back while a device
 # is connected ($XDG_RUNTIME_DIR/ztos-live/ztsettings). One of it runs per
 # session; the shell starts it.
+#
+# Written when BlueZ or the sound server says something changed (at most once
+# a second), and every 30 s for a headset's battery. It used to poll every
+# 2 s, starting bluetoothctl two or three times a round with grep, awk and
+# sed around it: on the Galaxy M20 that was most of the CPU time a profile
+# found while an app was in use. BlueZ is asked through busctl instead.
 f=${XDG_RUNTIME_DIR:-/tmp}/ztos-bt
 live=${XDG_RUNTIME_DIR:-/tmp}/ztos-live
 mkdir -p "$live"
-while :; do
-	on=0 name= battery= streaming=0
-	if bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
+
+# the value of a D-Bus property as busctl prints it ("b true", "s \"Name\"")
+prop() {
+	busctl --system get-property org.bluez "$1" "$2" "$3" 2>/dev/null
+}
+
+refresh() {
+	local on=0 name= battery= streaming=0 adapter dev v
+	adapter=$(busctl --system tree --list org.bluez 2>/dev/null | grep -m1 '^/org/bluez/hci[0-9]*$')
+	if [ -n "$adapter" ] && [ "$(prop "$adapter" org.bluez.Adapter1 Powered)" = "b true" ]; then
 		on=1
-		mac=$(bluetoothctl devices Connected 2>/dev/null | awk 'NR == 1 { print $2 }')
-		if [ -n "$mac" ]; then
-			info=$(bluetoothctl info "$mac" 2>/dev/null)
-			name=$(printf '%s\n' "$info" | sed -n 's/^\tAlias: //p')
-			battery=$(printf '%s\n' "$info" | sed -n 's/.*Battery Percentage: .*(\([0-9]*\)).*/\1/p')
-			pactl list short sinks 2>/dev/null | grep "bluez_output" | grep -q RUNNING && streaming=1
-		fi
+		for dev in $(busctl --system tree --list org.bluez 2>/dev/null | grep "^$adapter/dev_[0-9A-F_]*$"); do
+			[ "$(prop "$dev" org.bluez.Device1 Connected)" = "b true" ] || continue
+			v=$(prop "$dev" org.bluez.Device1 Alias)
+			v=${v#s \"}
+			name=${v%\"}
+			v=$(prop "$dev" org.bluez.Battery1 Percentage)
+			[ -n "$v" ] && battery=${v#y }
+			case $(pactl list short sinks 2>/dev/null) in
+			*bluez_output*RUNNING*) streaming=1 ;;
+			esac
+			break
+		done
 	fi
 	printf 'on=%s\nconnected=%s\nbattery=%s\nstreaming=%s\n' "$on" "$name" "$battery" "$streaming" > "$f.new"
 	mv "$f.new" "$f"
@@ -34,5 +52,25 @@ while :; do
 	else
 		rm -f "$live/ztsettings"
 	fi
-	sleep 2
+}
+
+# BlueZ's signals and the sound server's sink events, as lines on one FIFO
+# held open both ways (no end of file if a watcher stops: the 30 s refresh
+# goes on); the watchers, this script's children, go when it does
+fifo=$(mktemp -u "${XDG_RUNTIME_DIR:-/tmp}/ztos-bt.XXXXXX")
+mkfifo "$fifo" && exec 3<>"$fifo" && rm -f "$fifo"
+trap 'pkill -P $$ 2>/dev/null' EXIT
+trap 'exit 0' TERM INT HUP
+gdbus monitor --system --dest org.bluez >&3 2>/dev/null &
+pactl subscribe 2>/dev/null | grep --line-buffered "on sink" >&3 &
+refresh
+last=$SECONDS
+while :; do
+	if read -r -t 30 -u 3 line; then
+		# a burst of events: one refresh, a second after the first of them
+		[ $((SECONDS - last)) -lt 1 ] && sleep 1
+		while read -r -t 0.2 -u 3 line; do :; done
+	fi
+	refresh
+	last=$SECONDS
 done
