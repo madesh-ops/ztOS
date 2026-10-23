@@ -758,6 +758,21 @@
 	};
 };
 
+/*
+ * How fast each core is for its clock, so the scheduler puts the busy threads
+ * (a browser's main thread, ztMETRO) on the two Cortex-A73s rather than on any
+ * of the six Cortex-A53s: without these every core counts 1024 alike. The
+ * values are mainline's for the same pair of cores (hi3660.dtsi).
+ */
+&cpu0 { capacity-dmips-mhz = <592>; };
+&cpu1 { capacity-dmips-mhz = <592>; };
+&cpu2 { capacity-dmips-mhz = <592>; };
+&cpu3 { capacity-dmips-mhz = <592>; };
+&cpu4 { capacity-dmips-mhz = <592>; };
+&cpu5 { capacity-dmips-mhz = <592>; };
+&cpu6 { capacity-dmips-mhz = <1024>; };
+&cpu7 { capacity-dmips-mhz = <1024>; };
+
 /* i2c_6: the motion sensors (exynos7904-m20lte-sensor-r03.dtsi). The
  * board has an LSM6DSL or a LIS2DS(12) depending on the batch (this one has
  * the LSM6DSL); each driver reads its WHO_AM_I and leaves a missing chip
