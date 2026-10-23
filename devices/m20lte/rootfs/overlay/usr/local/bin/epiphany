@@ -1,6 +1,0 @@
-#!/bin/sh
-# GNOME Web on the M20: it goes straight out over Wi-Fi, not through
-# /etc/environment's USB proxy, which is only there while the phone is
-# tethered to a computer.
-unset all_proxy ALL_PROXY
-exec /usr/bin/epiphany "$@"

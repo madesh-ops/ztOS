@@ -19,14 +19,11 @@ newsflash
 # Bluetooth (devices/m20lte/drivers/scsc-bt makes the hci_dev)
 bluez
 bluez-utils
-# A browser made for phones (GNOME Web: adaptive, address bar at the bottom);
-# devices/m20lte/rootfs/overlay/usr/local/bin/epiphany starts it off the USB
-# proxy
+# A browser made for phones (GNOME Web: adaptive, address bar at the bottom)
 epiphany
 # The app store as on postmarketOS: GNOME Software, Flathub apps through
 # Flatpak (no PackageKit: system packages stay with the ztOS updater). Add
 # Flathub once: flatpak remote-add --if-not-exists flathub
-# https://dl.flathub.org/repo/flathub.flatpakrepo. rootfs/overlay/usr/local/bin/
-# gnome-software keeps it off the USB proxy
+# https://dl.flathub.org/repo/flathub.flatpakrepo
 gnome-software
 flatpak
