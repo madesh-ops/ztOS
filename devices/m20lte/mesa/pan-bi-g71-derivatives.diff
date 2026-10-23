@@ -1,0 +1,284 @@
+--- a/src/panfrost/compiler/bifrost/bifrost_nir.c
++++ b/src/panfrost/compiler/bifrost/bifrost_nir.c
+@@ -17,6 +17,8 @@
+ #include "bifrost_compile.h"
+ #include "bifrost_nir.h"
+ #include "compiler.h"
++#include "util/hash_table.h"
++#include "bi_quirks.h"
+ #include "../kraid/kraid.h"
+ 
+ static bool
+@@ -860,6 +862,261 @@
+ static bool bi_should_idvs(nir_shader *nir, const struct pan_compile_inputs *inputs);
+ static bool bifrost_nir_lower_vs_atomics(nir_shader *nir);
+ 
++
++/*
++ * The Mali-G71 has no working cross-lane read: CLPER_OLD returns zero there,
++ * whatever lane it is given (the pixel's own included), and the full CLPER is
++ * an invalid encoding. Every derivative built on it is wrong: fwidth() sizes
++ * anti-aliased edges, so they turn into wide blurs or vanish.
++ *
++ * Compute fragment-shader derivatives without crossing lanes instead: evaluate
++ * the differentiated value again with its varyings interpolated half a pixel
++ * either side (LD_VAR at an explicit offset) and gl_FragCoord moved the same,
++ * and take the difference, which is what the neighbouring pixel would have
++ * given. Values that are the same across the quad (constants, uniforms, flat
++ * inputs) are shared. A derivative whose operand cannot be evaluated this way
++ * (it depends on a phi, a memory load...) is left as it was.
++ */
++
++struct g71_deriv_state {
++   struct hash_table *map;
++   float ox, oy;
++   unsigned budget;
++};
++
++/* Intrinsics whose value does not depend on where in the quad it is read */
++static bool
++g71_same_across_quad(const nir_intrinsic_instr *intr)
++{
++   static const char *const names[] = {
++      "load_input", "load_per_primitive_input", "load_ubo", "load_ubo_vec4",
++      "load_uniform", "load_push_constant", "load_push_data", "load_constant",
++      "load_global_constant", "load_front_face", "load_layer_id",
++      "load_view_index", "load_primitive_id", "load_sysval_pan",
++   };
++   const char *name = nir_intrinsic_infos[intr->intrinsic].name;
++
++   for (unsigned i = 0; i < ARRAY_SIZE(names); i++) {
++      if (strcmp(name, names[i]) == 0)
++         return true;
++   }
++   return false;
++}
++
++static nir_def *g71_eval_at(nir_builder *b, nir_def *def,
++                            struct g71_deriv_state *st);
++
++struct g71_src_list {
++   nir_def **defs;
++   unsigned next;
++};
++
++static bool
++g71_set_src(nir_src *src, void *data)
++{
++   struct g71_src_list *list = data;
++   *src = nir_src_for_ssa(list->defs[list->next++]);
++   return true;
++}
++
++/* Clone `instr` with its sources evaluated at the offset; `def` itself when
++ * none of them changed */
++static nir_def *
++g71_clone_with_srcs(nir_builder *b, nir_def *def, nir_src *srcs, unsigned n,
++                    struct g71_deriv_state *st)
++{
++   nir_def *at[NIR_MAX_VEC_COMPONENTS * 4];
++   bool same = true;
++
++   assert(n <= ARRAY_SIZE(at));
++   for (unsigned i = 0; i < n; i++) {
++      at[i] = g71_eval_at(b, srcs[i].ssa, st);
++      if (!at[i])
++         return NULL;
++      same &= at[i] == srcs[i].ssa;
++   }
++   if (same)
++      return def;
++
++   nir_instr *clone = nir_instr_clone(b->shader, nir_def_instr(def));
++   struct g71_src_list list = { .defs = at };
++   nir_foreach_src(clone, g71_set_src, &list);
++   assert(list.next == n);
++   nir_builder_instr_insert(b, clone);
++   return nir_instr_def(clone);
++}
++
++static nir_def *
++g71_eval_at(nir_builder *b, nir_def *def, struct g71_deriv_state *st)
++{
++   struct hash_entry *he = _mesa_hash_table_search(st->map, def);
++   if (he)
++      return he->data;
++   if (st->budget == 0)
++      return NULL;
++   st->budget--;
++
++   nir_instr *instr = nir_def_instr(def);
++   nir_def *res = NULL;
++
++   switch (instr->type) {
++   case nir_instr_type_load_const:
++   case nir_instr_type_undef:
++      res = def;
++      break;
++
++   case nir_instr_type_alu: {
++      nir_alu_instr *alu = nir_instr_as_alu(instr);
++      nir_src srcs[NIR_MAX_VEC_COMPONENTS];
++      unsigned n = nir_op_infos[alu->op].num_inputs;
++
++      for (unsigned i = 0; i < n; i++)
++         srcs[i] = alu->src[i].src;
++      res = g71_clone_with_srcs(b, def, srcs, n, st);
++      break;
++   }
++
++   case nir_instr_type_tex: {
++      nir_tex_instr *tex = nir_instr_as_tex(instr);
++      nir_src srcs[NIR_MAX_VEC_COMPONENTS * 4];
++
++      if (tex->num_srcs > ARRAY_SIZE(srcs))
++         return NULL;
++      for (unsigned i = 0; i < tex->num_srcs; i++)
++         srcs[i] = tex->src[i].src;
++      res = g71_clone_with_srcs(b, def, srcs, tex->num_srcs, st);
++      break;
++   }
++
++   case nir_instr_type_intrinsic: {
++      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++
++      switch (intr->intrinsic) {
++      case nir_intrinsic_load_interpolated_input: {
++         nir_intrinsic_instr *bary =
++            nir_def_as_intrinsic_or_null(intr->src[0].ssa);
++         nir_def *offset = nir_imm_vec2(b, st->ox, st->oy);
++
++         if (!bary)
++            return NULL;
++         switch (bary->intrinsic) {
++         case nir_intrinsic_load_barycentric_pixel:
++         case nir_intrinsic_load_barycentric_centroid:
++         case nir_intrinsic_load_barycentric_sample:
++         case nir_intrinsic_load_barycentric_at_sample:
++            break;
++         case nir_intrinsic_load_barycentric_at_offset:
++            offset = nir_fadd(b, nir_f2f32(b, bary->src[0].ssa), offset);
++            break;
++         default:
++            return NULL;
++         }
++
++         nir_def *index = g71_eval_at(b, intr->src[1].ssa, st);
++         if (!index)
++            return NULL;
++
++         nir_def *at = nir_load_barycentric_at_offset(
++            b, 32, offset, .interp_mode = nir_intrinsic_interp_mode(bary));
++         nir_intrinsic_instr *clone =
++            nir_instr_as_intrinsic(nir_instr_clone(b->shader, instr));
++         clone->src[0] = nir_src_for_ssa(at);
++         clone->src[1] = nir_src_for_ssa(index);
++         nir_builder_instr_insert(b, &clone->instr);
++         res = &clone->def;
++         break;
++      }
++
++      case nir_intrinsic_load_frag_coord:
++         res = nir_fadd(b, def, nir_imm_vec4(b, st->ox, st->oy, 0, 0));
++         break;
++
++      case nir_intrinsic_load_frag_coord_xy:
++         res = nir_fadd(b, def, nir_imm_vec2(b, st->ox, st->oy));
++         break;
++
++      default:
++         if (!g71_same_across_quad(intr))
++            return NULL;
++         res = g71_clone_with_srcs(b, def, intr->src,
++                                   nir_intrinsic_infos[intr->intrinsic].num_srcs,
++                                   st);
++         break;
++      }
++      break;
++   }
++
++   default:
++      return NULL;
++   }
++
++   if (res)
++      _mesa_hash_table_insert(st->map, def, res);
++   return res;
++}
++
++static nir_def *
++g71_eval_at_offset(nir_builder *b, nir_def *def, float ox, float oy)
++{
++   struct g71_deriv_state st = {
++      .map = _mesa_pointer_hash_table_create(NULL),
++      .ox = ox,
++      .oy = oy,
++      .budget = 512,
++   };
++   nir_def *res = g71_eval_at(b, def, &st);
++   _mesa_hash_table_destroy(st.map, NULL);
++   return res;
++}
++
++static bool
++g71_lower_derivative(nir_builder *b, nir_intrinsic_instr *intr, void *data)
++{
++   bool x;
++
++   switch (intr->intrinsic) {
++   case nir_intrinsic_ddx:
++   case nir_intrinsic_ddx_fine:
++   case nir_intrinsic_ddx_coarse:
++      x = true;
++      break;
++   case nir_intrinsic_ddy:
++   case nir_intrinsic_ddy_fine:
++   case nir_intrinsic_ddy_coarse:
++      x = false;
++      break;
++   default:
++      return false;
++   }
++
++   /* Offsets go in 1/16 of a pixel and stop short of +0.5 (+0.5 reads as
++    * 7/16), so step 7/16 either side and scale the difference up to a whole
++    * pixel */
++   b->cursor = nir_before_instr(&intr->instr);
++   nir_def *src = intr->src[0].ssa;
++   float h = 7.0f / 16.0f;
++   nir_def *after = g71_eval_at_offset(b, src, x ? h : 0, x ? 0 : h);
++   nir_def *before = after ? g71_eval_at_offset(b, src, x ? -h : 0, x ? 0 : -h)
++                           : NULL;
++
++   /* (anything already emitted for a failed attempt is dead code) */
++   if (!after || !before)
++      return false;
++
++   nir_def *diff = nir_fsub(b, after, before);
++   nir_def_replace(&intr->def,
++                   nir_fmul(b, diff, nir_imm_floatN_t(b, 1.0 / (2 * h),
++                                                      diff->bit_size)));
++   return true;
++}
++
++static bool
++bifrost_nir_lower_derivatives_g71(nir_shader *nir)
++{
++   return nir_shader_intrinsics_pass(nir, g71_lower_derivative,
++                                     nir_metadata_control_flow, NULL);
++}
++
+ void
+ bifrost_postprocess_nir(nir_shader *nir,
+                         const struct pan_compile_inputs *inputs,
+@@ -902,6 +1159,10 @@
+       NIR_PASS(_, nir, pan_nir_resize_varying_io, inputs->varying_layout);
+ 
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
++      /* Mali-G71: derivatives without CLPER (see above) */
++      if (bifrost_get_quirks(gpu_id) & BIFROST_NO_FP32_TRANSCENDENTALS)
++         NIR_PASS(_, nir, bifrost_nir_lower_derivatives_g71);
++
+       NIR_PASS(_, nir, nir_lower_is_helper_invocation);
+       NIR_PASS(_, nir, pan_nir_lower_helper_invocation);
+       NIR_PASS(_, nir, pan_nir_lower_sample_pos);

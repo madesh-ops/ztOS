@@ -53,11 +53,31 @@ rendering.
 5. Fixed lanes as full words (`bi_imm_u32`; `bi_imm_u8` gives `#0x1010101`): the
    disassembly shows `CLPER_OLD.i32 %36, #0x1`, and still 0.
 
-So on this G71 `CLPER_OLD.i32` seems to return the invocation's own value whatever lane
-it is given. The `LIMITED_CLPER` lowering was fixed for the Mali-G31 (75353622,
-"Fix clper_xor on Mali-G31"); the G71 (v6) may need something else, or a hardware
-erratum of r0p0 may be involved. The AFBC issue on the same GPU is separate
-(`PAN_MESA_DEBUG=noafbc` is set throughout; it fixed black 16x16 tiles in Firefox).
+The AFBC issue on the same GPU is separate (`PAN_MESA_DEBUG=noafbc` is set throughout;
+it fixed black 16x16 tiles in Firefox).
+
+### What it turned out to be (2026-10-23)
+
+`CLPER_OLD.i32` returns **zero** on this G71, whatever lane it is given: the pixel's
+own lane (`lane_id`) and lane 0 read 0 too. The pattern above is right − 0 = the
+pixel's value in the right column and 0 − left clamped to 0 in the RGBA8 target in
+the left one. The full `CLPER.i32` (v7) is an invalid encoding here
+(`INSTR_INVALID_ENC` job fault). Setting the RSD's "shader contains barrier" (helper
+threads) bit makes the shader write nothing. `BIFROST_MESA_DEBUG=nosched` changes
+nothing. Mesa 20.0's disassembler, built from Arm's G71 output on a HiKey960, lists
+no cross-lane instruction at all.
+
+Fix: don't cross lanes. `../mesa/pan-bi-g71-derivatives.diff` adds a NIR pass
+(`bifrost_nir_lower_derivatives_g71`, G71 only) that evaluates the differentiated
+value again with its varyings interpolated at an explicit offset (LD_VAR,
+`load_barycentric_at_offset`) and `gl_FragCoord` moved the same, at ±7/16 of a
+pixel (offsets go in 1/16 and +0.5 reads as +7/16), and scales the difference by
+8/7. Constants, uniforms and flat inputs are shared; a derivative of anything it
+cannot re-evaluate (a phi, a memory load) is left alone. derivtest then reads
+exactly what llvmpipe does (dFdx 1, dFdy 2, fwidth 1 and 2, highp and mediump),
+GTK 4's GL renderer draws labels and rounded buttons, and Firefox's GPU WebRender
+draws rounded tabs and fields with clean edges. `../mesa/build-mesa.sh` rebuilds
+libgallium with it on the phone.
 
 ### Reproduce
 
