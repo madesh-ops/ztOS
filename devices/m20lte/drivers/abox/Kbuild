@@ -1,0 +1,9 @@
+# Sound on the Galaxy M20: ABOX (the audio DSP) as a remote processor, its
+# PCM, the TFA9896 speaker amplifier and the card, from the Galaxy Tab A 10.1
+# 2019 port (github.com/Mollomm1/linux-exynos7885, branch gta3xl). The
+# DISPAUD clocks, power domain and the ABOX System MMU they need are in the
+# kernel (kernel/patches/exynos7885-dispaud-*.patch).
+obj-m += exynos7885_abox_rproc.o
+obj-m += exynos7885-abox-pcm.o
+obj-m += zrn-tfa9896.o
+obj-m += zrn-m20-card.o

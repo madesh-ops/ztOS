@@ -112,8 +112,9 @@ cd "$SRC"
 [ -f out/.config ] || make -s O=out defconfig
 cfg() { ./scripts/config --file out/.config "$@"; }
 # Other SoCs, and whole subsystems this phone has nothing of (or nothing a
-# mainline driver exists for yet: PCIe, sound). Wi-Fi and Bluetooth are cfg80211
-# and BT below, with drivers/scsc-wlan and drivers/scsc-bt.
+# mainline driver exists for yet: PCIe). Wi-Fi and Bluetooth are cfg80211
+# and BT below, with drivers/scsc-wlan and drivers/scsc-bt; sound is ALSA's
+# core below, with drivers/abox.
 for sym in ARCH_ACTIONS ARCH_AIROHA ARCH_SUNXI ARCH_ALPINE ARCH_APPLE ARCH_BCM \
 	ARCH_BCM2835 ARCH_BCMBCA ARCH_BRCMSTB ARCH_BERLIN ARCH_BLAIZE ARCH_EXYNOSAUTOV9 \
 	ARCH_SPARX5 ARCH_K3 ARCH_LG1K ARCH_HISI ARCH_KEEMBAY ARCH_MEDIATEK ARCH_MESON \
@@ -122,7 +123,7 @@ for sym in ARCH_ACTIONS ARCH_AIROHA ARCH_SUNXI ARCH_ALPINE ARCH_APPLE ARCH_BCM \
 	ARCH_STM32 ARCH_SYNQUACER ARCH_TEGRA ARCH_TESLA_FSD ARCH_SPRD ARCH_THUNDER \
 	ARCH_THUNDER2 ARCH_UNIPHIER ARCH_VEXPRESS ARCH_VISCONTI ARCH_XGENE ARCH_ZYNQMP \
 	ARCH_SOPHGO ARCH_STM32MP ARCH_MMP ARCH_WPCM450 ARCH_VT8500 \
-	SOUND SND MEDIA_SUPPORT PCI ACPI EFI NUMA XEN KVM VIRTUALIZATION \
+	MEDIA_SUPPORT PCI ACPI EFI NUMA XEN KVM VIRTUALIZATION \
 	VIRTIO_MENU INFINIBAND MTD ATA MD NVME_CORE SCSI_LOWLEVEL \
 	ETHERNET WWAN USB_NET_DRIVERS PHYLIB \
 	INPUT_JOYSTICK INPUT_TABLET W1 FUSION FIREWIRE MACINTOSH_DRIVERS \
@@ -170,7 +171,8 @@ for sym in BLK_DEV_INITRD ARCH_EXYNOS PINCTRL_EXYNOS PINCTRL_SAMSUNG EXYNOS_PMU 
 	CMDLINE_FORCE NETFILTER CGROUPS NAMESPACES FHANDLE AUTOFS_FS SECCOMP \
 	INOTIFY_USER SIGNALFD SECURITY_LANDLOCK TIMERFD EPOLL UNIX INET IPV6 PACKET TUN \
 	ZRAM FUSE_FS WIRELESS CFG80211 \
-	BT BT_BREDR BT_LE BT_RFCOMM BT_HIDP BT_BNEP CRYPTO_AES CRYPTO_CMAC; do
+	BT BT_BREDR BT_LE BT_RFCOMM BT_HIDP BT_BNEP CRYPTO_AES CRYPTO_CMAC \
+	SOUND SND SND_SOC REMOTEPROC EXYNOS_IOMMU; do
 	cfg --enable "$sym"
 done
 # USB is a device here, never a host: dual-role needs the S2MU004's cable
@@ -196,8 +198,10 @@ cfg --set-str LOCALVERSION "-zboot"
 # clk_ignore_unused / pd_ignore_unused: the display, its DSI link and the
 # panel's power are the bootloader's and have no mainline driver; gating the
 # clocks nobody claims would freeze the screen (the stock kernel runs with
-# clk_ignore_unused too).
-CMDLINE="console=tty0 loglevel=7 panic=5 keep_bootcon clk_ignore_unused pd_ignore_unused maxcpus=8"
+# clk_ignore_unused too). exynos7885.dispaud=1: register CMU_DISPAUD (the
+# audio PLL and ABOX's clocks, kernel/patches/exynos7885-dispaud-clk.patch),
+# which sound needs; the display keeps running on the same CMU.
+CMDLINE="console=tty0 loglevel=7 panic=5 keep_bootcon clk_ignore_unused pd_ignore_unused maxcpus=8 exynos7885.dispaud=1"
 [ -n "$SERIAL" ] && CMDLINE="console=ttySAC2,115200 $CMDLINE"
 [ -n "$WDT" ] && CMDLINE="$CMDLINE s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60"
 CMDLINE="$CMDLINE${EXTRA:+ $EXTRA}"
@@ -207,7 +211,7 @@ make -s O=out olddefconfig
 # missing, or 7.1 renamed it) is worth knowing before flashing.
 for sym in ARCH_EXYNOS MMC_DW_EXYNOS DRM_SIMPLEDRM DRM_PANFROST TOUCHSCREEN_HIMAX_HX83112B INPUT_GPIO_VIBRA \
 	I2C_EXYNOS5 EXYNOS_USI USB_DWC3_EXYNOS PHY_EXYNOS5_USBDRD USB_CONFIGFS_NCM \
-	SYSCON_REBOOT_MODE PSTORE_RAM IIO_ST_LSM6DSX_I2C; do
+	SYSCON_REBOOT_MODE PSTORE_RAM IIO_ST_LSM6DSX_I2C SND_SOC EXYNOS_IOMMU; do
 	grep -q "^CONFIG_$sym=y" out/.config || echo "WARNING: CONFIG_$sym is not =y"
 done
 
@@ -239,6 +243,7 @@ make -s -C "$SRC" O="$SRC/out" M="$DEV/drivers" modules > "$B/modules-m20lte-bui
 }
 cp out/drivers/firmware/samsung/acpm-protocol.ko "$DEV/drivers/"
 cp "$DEV/drivers/scsc-wlan/scsc_wlan.ko" "$DEV/drivers/scsc-bt/scsc_bt.ko" "$DEV/drivers/"
+cp "$DEV"/drivers/abox/*.ko "$DEV/drivers/"
 ls -l "$DEV"/drivers/*.ko
 
 echo "=== uniLoader ==="

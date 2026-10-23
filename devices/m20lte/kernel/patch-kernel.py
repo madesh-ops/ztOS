@@ -487,49 +487,6 @@ elif s.count(old_loop) == 1:
 else:
     sys.exit(f"patch-kernel: {SYSFB}: the damage loop changed")
 
-# --- speaker amplifier -----------------------------------------------------------
-# The M20's speaker amp is an NXP TFA9896 (revision 0x1b96 read back on i2c_3,
-# 0x34). tfa989x runs these chips with their CoolFlux DSP bypassed, which needs
-# no firmware container; the 9896 only adds its own power-on settings, taken
-# from Samsung's driver (tfa9896_specific() in sound/soc/codecs/tfa9896/
-# tfa_init.c, the same for revisions 0x1b96, 0x2b96 and 0x3b96). Unused until
-# the kernel has sound (SND is off in build-boot.sh: ABOX has no driver yet).
-AMP = "sound/soc/codecs/tfa989x.c"
-insert(AMP, "TFA9896_REVISION",
-       "#define TFA9897_REVISION		0x97\n",
-       "#define TFA9896_REVISION		0x96\n", after=False)
-insert(AMP, "tfa9896_init",
-       "static const struct tfa989x_rev tfa9897_rev = {",
-       """static int tfa9896_init(struct regmap *regmap)
-{
-	static const struct reg_sequence seq[] = {
-		{ 0x06, 0x000b },
-		{ 0x07, 0x3e7f },
-		{ 0x0a, 0x0d8a },
-		/* Reduce slewrate by clearing iddqtestbst to avoid booster damage */
-		{ TFA989X_CURRENTSENSE3, 0x0300 },
-		{ 0x88, 0x0100 },
-	};
-	int ret;
-
-	ret = regmap_multi_reg_write(regmap, seq, ARRAY_SIZE(seq));
-	if (ret)
-		return ret;
-
-	/* Enable clipping */
-	return regmap_clear_bits(regmap, TFA989X_CURRENTSENSE4, 0x1);
-}
-
-static const struct tfa989x_rev tfa9896_rev = {
-	.rev	= TFA9896_REVISION,
-	.init	= tfa9896_init,
-};
-
-""", after=False)
-insert(AMP, '"nxp,tfa9896"',
-       '\t{ .compatible = "nxp,tfa9897", .data = &tfa9897_rev },\n',
-       '\t{ .compatible = "nxp,tfa9896", .data = &tfa9896_rev },\n', after=False)
-
 # --- watchdog ------------------------------------------------------------------
 WDT = "drivers/watchdog/s3c2410_wdt.c"
 insert(WDT, "drv_data_exynos7885",
@@ -985,3 +942,16 @@ insert(CLK, '"gout_tmu_pclk"',
        """	GATE(CLK_GOUT_TMU_PCLK, "gout_tmu_pclk", "mout_peri_bus_user",
 	     CLK_CON_GAT_GOUT_PERI_TMU_PCLK, 21, 0, 0),
 """)
+
+# --- sound -----------------------------------------------------------------------
+# What ABOX (the audio DSP, devices/m20lte/drivers/abox/) needs from the kernel,
+# from the Galaxy Tab A 10.1 2019 port: the DISPAUD clocks with the audio PLL
+# (only with exynos7885.dispaud=1; after the CMU_G3D and TMU changes above,
+# which the patch is made against), the DISPAUD power domain, which is never
+# powered down, and the ABOX System MMU's second page table.
+apply_patch("exynos7885-dispaud-clk.patch", "drivers/clk/samsung/clk-exynos7885.c",
+            "exynos7885_enable_dispaud")
+apply_patch("exynos-pd-dispaud.patch", "drivers/pmdomain/samsung/exynos-pm-domains.c",
+            "exynos7885_dispaud_cfg")
+apply_patch("exynos-iommu-abox.patch", "drivers/iommu/exynos-iommu.c",
+            "REG_V7_PT_BASE1")

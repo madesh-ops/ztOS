@@ -8,7 +8,9 @@ SCSC) carries over; the board side (panel, touch, amplifier count, sensors)
 does not. postmarketOS itself has nothing newer for the M20: its Exynos 7885
 devices (A20/A30/A40, jackpotlte) are archived ports on Samsung's 4.4 kernel.
 
-Read on 2026-10-22, not yet built or run here.
+Read on 2026-10-22. Ported since: ACPM and S2MPU08 BUCK5 (GPU DVFS), the TMU,
+Wi-Fi and Bluetooth, and on 2026-10-23 sound through the speaker (step 3
+below, without the COD3035X: `drivers/abox/`, `kernel/patches/`).
 
 ## What is there, and what it means for the M20
 

@@ -1,0 +1,170 @@
+The Exynos 7885 ABOX System MMU walks a second page table for its CA7, and a
+fault no handler takes is reported instead of panicking. From the Galaxy Tab
+A 10.1 2019 port by Mollomm1 (github.com/Mollomm1/linux-exynos7885, branch
+gta3xl: 52dd529d12, ef4c8bfca9).
+
+diff --git a/drivers/iommu/exynos-iommu.c b/drivers/iommu/exynos-iommu.c
+index 874d05f..ee1ad7e 100644
+--- a/drivers/iommu/exynos-iommu.c
++++ b/drivers/iommu/exynos-iommu.c
+@@ -20,6 +20,7 @@
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
++#include <linux/ratelimit.h>
+ #include <linux/slab.h>
+ 
+ #include "dma-iommu.h"
+@@ -170,6 +171,9 @@ static u32 lv2ent_offset(sysmmu_iova_t iova)
+ #define REG_V7_CAPA0		0x870
+ #define REG_V7_CAPA1		0x874
+ #define REG_V7_CTRL_VM		0x8000
++/* Second page table of the Exynos7885 ABOX System MMU */
++#define REG_V7_PT_BASE1		0x1020
++#define FLUSH_PT1		BIT(4)
+ 
+ #define has_sysmmu(dev)		(dev_iommu_priv_get(dev) != NULL)
+ 
+@@ -306,8 +310,19 @@ struct sysmmu_drvdata {
+ 
+ 	/* v7 fields */
+ 	bool has_vcr;			/* virtual machine control register */
++	bool has_pt1;			/* second page table (Exynos7885 ABOX) */
++
++	/* fault interrupt rate limiting */
++	int irq;			/* fault interrupt */
++	bool irq_stopped;		/* disabled after a fault storm */
++	unsigned long fault_window;	/* jiffies when the count restarted */
++	unsigned int fault_count;	/* faults since fault_window */
++	struct ratelimit_state fault_rs; /* fault report rate limit */
+ };
+ 
++/* More faults than this within a second stop the fault interrupt. */
++#define SYSMMU_FAULT_STORM	20000
++
+ #define SYSMMU_REG(data, reg) ((data)->sfrbase + (data)->variant->reg)
+ 
+ static int exynos_sysmmu_v1_get_fault_info(struct sysmmu_drvdata *data,
+@@ -449,6 +464,8 @@ static bool sysmmu_block(struct sysmmu_drvdata *data)
+ static void __sysmmu_tlb_invalidate(struct sysmmu_drvdata *data)
+ {
+ 	writel(0x1, SYSMMU_REG(data, flush_all));
++	if (data->has_pt1)
++		writel(FLUSH_PT1 | 0x1, SYSMMU_REG(data, flush_all));
+ }
+ 
+ static void __sysmmu_tlb_invalidate_entry(struct sysmmu_drvdata *data,
+@@ -468,6 +485,14 @@ static void __sysmmu_tlb_invalidate_entry(struct sysmmu_drvdata *data,
+ 		       SYSMMU_REG(data, flush_end));
+ 		writel(0x1, SYSMMU_REG(data, flush_range));
+ 	}
++
++	/* The second page table is only invalidated by range. */
++	if (data->has_pt1) {
++		writel(iova & SPAGE_MASK, SYSMMU_REG(data, flush_start));
++		writel((iova & SPAGE_MASK) + (num_inv - 1) * SPAGE_SIZE,
++		       SYSMMU_REG(data, flush_end));
++		writel(FLUSH_PT1 | 0x1, SYSMMU_REG(data, flush_range));
++	}
+ }
+ 
+ static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
+@@ -480,6 +505,8 @@ static void __sysmmu_set_ptbase(struct sysmmu_drvdata *data, phys_addr_t pgd)
+ 		pt_base = pgd >> SPAGE_ORDER;
+ 
+ 	writel(pt_base, SYSMMU_REG(data, pt_base));
++	if (data->has_pt1)
++		writel(pt_base, data->sfrbase + REG_V7_PT_BASE1);
+ 	__sysmmu_tlb_invalidate(data);
+ }
+ 
+@@ -576,20 +603,45 @@ static irqreturn_t exynos_sysmmu_irq(int irq, void *dev_id)
+ 	spin_lock(&data->lock);
+ 	clk_enable(data->clk_master);
+ 
++	/*
++	 * Each fault leaves the System MMU blocked until it is unblocked
++	 * below. If the master keeps faulting, leave it blocked and stop the
++	 * interrupt instead of spending all CPU time here; the master stalls
++	 * until the System MMU is enabled again.
++	 */
++	if (time_after(jiffies, data->fault_window + HZ)) {
++		data->fault_window = jiffies;
++		data->fault_count = 0;
++	}
++	if (++data->fault_count > SYSMMU_FAULT_STORM) {
++		dev_err(data->sysmmu, "%s: fault storm, master stalled\n",
++			dev_name(data->master));
++		data->irq_stopped = true;
++		disable_irq_nosync(irq);
++		clk_disable(data->clk_master);
++		spin_unlock(&data->lock);
++		return IRQ_HANDLED;
++	}
++
+ 	itype = __ffs(readl(SYSMMU_REG(data, int_status)));
+ 	ret = data->variant->get_fault_info(data, itype, &fault);
+ 	if (ret) {
+-		dev_err(data->sysmmu, "Unhandled interrupt bit %u\n", itype);
++		dev_err_ratelimited(data->sysmmu, "Unhandled interrupt bit %u\n",
++				    itype);
+ 		goto out;
+ 	}
+-	show_fault_information(data, &fault);
+ 
+ 	if (data->domain) {
+ 		ret = report_iommu_fault(&data->domain->domain, data->master,
+ 					 fault.addr, fault.type);
+ 	}
+-	if (ret)
+-		panic("Unrecoverable System MMU Fault!");
++	/*
++	 * A fault the master does not handle is reported and the transaction
++	 * dropped, rather than panicking: for a display controller, a fault
++	 * costs a frame, a panic the system.
++	 */
++	if (ret && __ratelimit(&data->fault_rs))
++		show_fault_information(data, &fault);
+ 
+ out:
+ 	writel(1 << itype, SYSMMU_REG(data, int_clear));
+@@ -658,6 +710,12 @@ static void __sysmmu_enable(struct sysmmu_drvdata *data)
+ 	__sysmmu_enable_vid(data);
+ 	writel(CTRL_ENABLE, data->sfrbase + REG_MMU_CTRL);
+ 	data->active = true;
++	if (data->irq_stopped) {
++		writel(readl(SYSMMU_REG(data, int_status)),
++		       SYSMMU_REG(data, int_clear));
++		data->irq_stopped = false;
++		enable_irq(data->irq);
++	}
+ 	spin_unlock_irqrestore(&data->lock, flags);
+ 
+ 	/*
+@@ -744,6 +802,8 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
+ 	if (irq <= 0)
+ 		return irq;
+ 
++	data->irq = irq;
++	ratelimit_state_init(&data->fault_rs, 5 * HZ, 10);
+ 	ret = devm_request_irq(dev, irq, exynos_sysmmu_irq, 0,
+ 				dev_name(dev), data);
+ 	if (ret) {
+@@ -777,6 +837,17 @@ static int exynos_sysmmu_probe(struct platform_device *pdev)
+ 
+ 	__sysmmu_get_version(data);
+ 
++	/*
++	 * The Exynos7885 ABOX System MMU walks a second page table for part of
++	 * its masters (its CA7). Point it at the same tables.
++	 */
++	data->has_pt1 = of_device_is_compatible(dev->of_node,
++						"samsung,exynos7885-abox-sysmmu");
++	if (data->has_pt1 && MMU_MAJ_VER(data->version) < 7) {
++		dev_err(dev, "second page table needs System MMU v7\n");
++		return -EINVAL;
++	}
++
+ 	ret = iommu_device_sysfs_add(&data->iommu, &pdev->dev, NULL,
+ 				     dev_name(data->sysmmu));
+ 	if (ret)

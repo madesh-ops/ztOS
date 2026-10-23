@@ -179,6 +179,24 @@
 			pmsg-size = <0x0>;
 			ecc-size = <0>;
 		};
+
+		/*
+		 * ABOX's firmware DRAM (12 MiB, which it sees at 0x80000000
+		 * through its System MMU) and the PCM rings (playback, then
+		 * capture). Placed by the kernel: the firmware never sees a
+		 * physical address.
+		 */
+		abox_dram: abox-dram {
+			size = <0xc00000>;
+			alignment = <0x0 0x100000>;
+			no-map;
+		};
+
+		abox_pcm: abox-pcm {
+			size = <0x20000>;
+			alignment = <0x0 0x10000>;
+			no-map;
+		};
 	};
 
 	gpio-keys {
@@ -332,6 +350,25 @@
 		regulator-name = "vdd_g3d";
 		regulator-min-microvolt = <600000>;
 		regulator-max-microvolt = <762500>;
+	};
+
+	/*
+	 * The speaker: ABOX's UAIF3 to the TFA9896, DSP_A frames with ABOX
+	 * driving the clocks (devices/m20lte/drivers/abox/zrn-m20-card.c).
+	 * Earpiece, headphones and microphones are the COD3035X's, not here yet.
+	 */
+	sound {
+		compatible = "zerone,m20lte-audio";
+		model = "Galaxy M20";
+		audio-routing = "Speaker", "Speaker OUT";
+
+		cpu {
+			sound-dai = <&abox_audio 0>;
+		};
+
+		codecs {
+			sound-dai = <&speaker_amp>;
+		};
 	};
 };
 
@@ -530,6 +567,91 @@
 		#mbox-cells = <0>;
 	};
 
+	/*
+	 * Sound: ABOX, the audio DSP block (a Cortex-A7 running Samsung's
+	 * "calliope" firmware), its System MMU, and the DISPAUD clocks and
+	 * power domain it shares with the display. Nodes as in the Galaxy Tab A
+	 * 10.1 2019 port (exynos7885.dtsi, branch gta3xl), addresses and
+	 * interrupts checked against the M20 kernel's exynos7885.dtsi.
+	 *
+	 * DISPAUD is on from the bootloader (the display runs in it); the
+	 * domain driver only ever reports it on, never powers it down.
+	 * CMU_DISPAUD registers only with exynos7885.dispaud=1 on the command
+	 * line: until then the System MMU, ABOX and the card wait for its
+	 * clocks, and nothing of this touches the hardware.
+	 */
+	pd_dispaud: power-domain@11c84020 {
+		compatible = "samsung,exynos7885-dispaud-pd";
+		reg = <0x11c84020 0x20>;
+		#power-domain-cells = <0>;
+	};
+
+	cmu_dispaud: clock-controller@14800000 {
+		compatible = "samsung,exynos7885-cmu-dispaud";
+		reg = <0x14800000 0x8000>;
+		#clock-cells = <1>;
+		clocks = <&oscclk>, <&cmu_top CLK_DOUT_DISPAUD_CPU>;
+		clock-names = "oscclk", "dout_dispaud_cpu";
+		power-domains = <&pd_dispaud>;
+	};
+
+	sysmmu_abox: iommu@14a30000 {
+		compatible = "samsung,exynos7885-abox-sysmmu",
+			     "samsung,exynos-sysmmu";
+		reg = <0x14a30000 0x9000>;
+		interrupts = <GIC_SPI 129 IRQ_TYPE_LEVEL_HIGH>;
+		/* Its registers are only reachable with the ABOX bus clock. */
+		clocks = <&cmu_dispaud CLK_GOUT_SMMU_ABOX_CLK>,
+			 <&cmu_dispaud CLK_GOUT_ABOX_ACLK>;
+		clock-names = "sysmmu", "master";
+		power-domains = <&pd_dispaud>;
+		#iommu-cells = <0>;
+	};
+
+	/*
+	 * devices/m20lte/drivers/abox/: the firmware is loaded and started
+	 * when a stream opens, and only with the rproc module's enable=1 and
+	 * allow_firmware_start=1. The firmware's options as the M20's own
+	 * tree passes them (samsung,abox-bootargs, at SRAM 0x22e00), with
+	 * vss=0: the modem's voice buffer is not mapped for it here.
+	 */
+	abox: audio-controller@14a50000 {
+		compatible = "samsung,exynos7885-abox";
+		reg = <0x14a50000 0x10000>,
+		      <0x14820000 0x10000>,
+		      <0x14b00000 0x28000>,
+		      <0x14af1000 0x1000>,
+		      <0x14af2000 0x1004>;
+		reg-names = "sfr", "sysreg", "sram", "gicd", "gicc";
+		interrupts = <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "abox";
+		clocks = <&cmu_dispaud CLK_FOUT_AUD_PLL>,
+			 <&cmu_dispaud CLK_GOUT_ABOX_CA7>,
+			 <&cmu_dispaud CLK_DOUT_AUDIF>,
+			 <&cmu_dispaud CLK_DOUT_UAIF3>,
+			 <&cmu_dispaud CLK_MOUT_AUD_UAIF3>,
+			 <&cmu_dispaud CLK_GOUT_ABOX_ACLK>,
+			 <&cmu_dispaud CLK_GOUT_UAIF3_BCLK>,
+			 <&cmu_dispaud CLK_GOUT_UAIF3_SYNC>;
+		clock-names = "pll", "ca7", "audif", "uaif3-div",
+			      "uaif3-mux", "aclk",
+			      "uaif3-bclk", "uaif3-sync";
+		power-domains = <&pd_dispaud>;
+		iommus = <&sysmmu_abox>;
+		memory-region = <&abox_dram>, <&abox_pcm>;
+		/* UAIF3, to the speaker amplifier (aud_spk_bus in the M20 tree) */
+		pinctrl-names = "active", "idle";
+		pinctrl-0 = <&aud_spk_bus>;
+		pinctrl-1 = <&aud_spk_bus_idle>;
+		samsung,bootargs = "init=ab0x vss=0";
+		samsung,bootargs-offset = <0x22e00>;
+
+		abox_audio: abox-audio {
+			compatible = "samsung,exynos7885-abox-audio";
+			#sound-dai-cells = <1>;
+		};
+	};
+
 	/* ZTOS-WATCHDOG: WDT at 0x10060000, A53 cluster: PMU 0x408/0x40c
 	 * bit 24 (drv_data_exynos8 in the M20 kernel's s3c2410_wdt.c).
 	 * Off unless make-dts.py --watchdog. */
@@ -622,9 +744,8 @@
 };
 
 /* i2c_3: the NXP TFA9896 speaker amplifier at 0x34 (revision 0x1b96), fed by
- * ABOX's UAIF3 (tfa98xx in exynos7904-m20lte_common.dtsi). tfa989x drives it
- * with its DSP bypassed (the 9896 added in kernel/patch-kernel.py); it binds
- * once the kernel has sound, which waits for an ABOX driver. */
+ * ABOX's UAIF3 (tfa98xx in exynos7904-m20lte_common.dtsi), its DSP bypassed
+ * (devices/m20lte/drivers/abox/zrn-tfa9896.c). */
 &i2c_3 {
 	status = "okay";
 	clock-frequency = <400000>;
