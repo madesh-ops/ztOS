@@ -426,6 +426,10 @@ struct zt_output {
 	struct wlr_output *wlr_output;
 	struct wl_listener frame, request_state, destroy;
 	struct wlr_buffer *last_submitted; /* identity only; never dereferenced */
+	/* While animating, a frame is drawn as soon as the one before it has
+	 * been handed over, and handed over itself when that one is on the
+	 * screen: the GPU draws while the display copies (see output_frame) */
+	struct wlr_buffer *ahead;
 };
 
 struct zt_server {
@@ -452,6 +456,8 @@ struct zt_server {
 	struct zt_anim anims[MAX_ANIMS];
 	uint32_t anim_frames, anim_last_ms, anim_worst_ms, anim_first_ms;
 	double anim_draw_ms, anim_finish_ms, anim_commit_ms;	/* where the frame time goes */
+	double anim_handover_ms;	/* waiting for a frame drawn ahead to be complete */
+	uint32_t anim_ahead;		/* frames drawn ahead (output_frame) */
 	float uv_off[2];		/* where in its texture the next quad starts (0, 0 but for a cropped surface) */
 	bool sweeping;			/* a live tile's long line is moving: keep drawing */
 
@@ -8127,6 +8133,11 @@ static void screen_set(struct zt_server *server, bool on) {
 	if (on) {
 		perf_tell("screen on\n");	/* clocks back up before the first frame */
 	}
+	if (server->output->ahead) {
+		/* a frame drawn ahead (render_frame) from before: never shown */
+		wlr_buffer_unlock(server->output->ahead);
+		server->output->ahead = NULL;
+	}
 	struct wlr_output_state state;
 	wlr_output_state_init(&state);
 	wlr_output_state_set_enabled(&state, on);
@@ -9712,7 +9723,47 @@ static float turn_place(struct zt_server *server, float m[16], float x, float y,
 	return shade >= 0 ? shade : turn_alpha(turn);
 }
 
-static void render_frame(struct zt_server *server) {
+/* The frame drawn ahead, if any, to the display; false if there was none */
+static bool commit_ahead(struct zt_server *server) {
+	struct zt_output *out = server->output;
+	struct wlr_buffer *buffer = out->ahead;
+	if (!buffer) {
+		return false;
+	}
+	out->ahead = NULL;
+	struct timespec t0, t1;
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	if (gl_begin(server)) {
+		glFinish();	/* long done by now: it was flushed a frame ago */
+		gl_end(server);
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	server->anim_handover_ms += (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6;
+	struct wlr_output_state state;
+	wlr_output_state_init(&state);
+	wlr_output_state_set_buffer(&state, buffer);
+	wlr_buffer_unlock(buffer);
+	bool ok = wlr_output_commit_state(out->wlr_output, &state);
+	if (ok) {
+		out->last_submitted = buffer;
+	} else {
+		wlr_log(WLR_ERROR, "output commit failed (frame drawn ahead)");
+	}
+	wlr_output_state_finish(&state);
+	return ok;
+}
+
+/* A frame drawn ahead that will not be shown (the screen went off) */
+static void drop_ahead(struct zt_output *out) {
+	if (out && out->ahead) {
+		wlr_buffer_unlock(out->ahead);
+		out->ahead = NULL;
+	}
+}
+
+/* Draw a frame. `show` hands it to the display at once; otherwise it is kept
+ * as the frame ahead, for the next frame event */
+static void render_frame(struct zt_server *server, bool show) {
 	struct wlr_output *output = server->output->wlr_output;
 	uint32_t now = now_ms();
 	bool running = anims_step(server, now);
@@ -10184,16 +10235,26 @@ static void render_frame(struct zt_server *server) {
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	struct timespec t1, t2, t3;
 	clock_gettime(CLOCK_MONOTONIC, &t1);
-	glFinish();	/* the buffer goes to the display as it is: it has to be complete */
+	if (show) {
+		glFinish();	/* the buffer goes to the display as it is: it has to be complete */
+	} else {
+		glFlush();	/* drawn while the display copies the frame before it */
+	}
 	gl_end(server);
 	clock_gettime(CLOCK_MONOTONIC, &t2);
 
-	wlr_output_state_set_buffer(&state, buffer);
-	wlr_buffer_unlock(buffer);
-	if (!wlr_output_commit_state(output, &state)) {
-		wlr_log(WLR_ERROR, "output commit failed");
+	if (show) {
+		wlr_output_state_set_buffer(&state, buffer);
+		wlr_buffer_unlock(buffer);
+		if (!wlr_output_commit_state(output, &state)) {
+			wlr_log(WLR_ERROR, "output commit failed");
+		} else {
+			server->output->last_submitted = buffer;
+		}
 	} else {
-		server->output->last_submitted = buffer;
+		drop_ahead(server->output);
+		server->output->ahead = buffer;
+		server->anim_ahead++;
 	}
 	wlr_output_state_finish(&state);
 	server->dirty = false;
@@ -10236,16 +10297,22 @@ static void render_frame(struct zt_server *server) {
 		wlr_output_schedule_frame(output);
 	} else if (server->anim_frames > 1) {
 		wlr_log(WLR_INFO, "animation: %u frames in %u ms (%.1f ms each, worst %u ms); "
-			"per frame: draw %.1f, finish %.1f, commit %.1f ms",
+			"per frame: draw %.1f, finish %.1f, commit %.1f ms; %u drawn ahead, "
+			"handed over after %.1f ms",
 			server->anim_frames, now - server->anim_first_ms,
 			(float)(now - server->anim_first_ms) / (server->anim_frames - 1),
 			server->anim_worst_ms, server->anim_draw_ms / server->anim_frames,
 			server->anim_finish_ms / server->anim_frames,
-			server->anim_commit_ms / server->anim_frames);
+			server->anim_commit_ms / server->anim_frames, server->anim_ahead,
+			server->anim_ahead ? server->anim_handover_ms / server->anim_ahead : 0.0);
 		server->anim_frames = 0;
 		server->anim_draw_ms = server->anim_finish_ms = server->anim_commit_ms = 0;
+		server->anim_handover_ms = 0;
+		server->anim_ahead = 0;
 	} else {
 		server->anim_frames = 0;
+		server->anim_handover_ms = 0;
+		server->anim_ahead = 0;
 	}
 	if (preparing && !running) {
 		server->dirty = true;	/* more of the list to draw, a little each frame */
@@ -10256,9 +10323,23 @@ static void render_frame(struct zt_server *server) {
 static void output_frame(struct wl_listener *listener, void *data) {
 	struct zt_output *output = wl_container_of(listener, output, frame);
 	struct zt_server *server = output->server;
+	/* The frame drawn during the last one goes up now. The display only says
+	 * a frame is done once it has copied it, after waiting for the scan to
+	 * come round (patch-kernel.py): drawn only then, every frame took the
+	 * drawing plus that wait plus the copy, 23-33 ms; drawn ahead, the GPU
+	 * works while the display waits and copies. */
+	bool shown = commit_ahead(server);
 	/* nothing damaged and nothing moving: no frame, and no further wake-ups */
-	if (server->dirty || server->moving || loading_active(server) || animating(server, NULL)) {
-		render_frame(server);
+	if (!(server->dirty || server->moving || loading_active(server) || animating(server, NULL))) {
+		return;
+	}
+	if (!shown) {
+		/* the first frame after a rest goes straight up, with no delay */
+		render_frame(server, true);
+	}
+	/* and while things move, the next one is drawn now, during the copy */
+	if (server->moving || loading_active(server) || animating(server, NULL)) {
+		render_frame(server, false);
 	}
 }
 
@@ -10273,6 +10354,7 @@ static void output_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&output->frame.link);
 	wl_list_remove(&output->request_state.link);
 	wl_list_remove(&output->destroy.link);
+	drop_ahead(output);
 	if (output->server->output == output) {
 		output->server->output = NULL;
 	}
