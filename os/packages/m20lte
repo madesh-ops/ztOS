@@ -23,3 +23,9 @@ bluez-utils
 # devices/m20lte/rootfs/overlay/usr/local/bin/epiphany starts it off the USB
 # proxy
 epiphany
+# The app store as on postmarketOS: GNOME Software, Flathub apps through
+# Flatpak (no PackageKit: system packages stay with the ztOS updater); the
+# Flathub remote is added at install. rootfs/overlay/usr/local/bin/gnome-software
+# keeps it off the USB proxy
+gnome-software
+flatpak

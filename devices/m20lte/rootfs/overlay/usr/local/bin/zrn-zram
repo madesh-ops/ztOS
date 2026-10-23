@@ -1,0 +1,21 @@
+#!/bin/sh
+# zrn-zram start|stop: compressed swap in RAM, half the RAM's size (see
+# zrn-zram.service)
+set -e
+dev=/sys/block/zram0
+case "$1" in
+start)
+	[ -e $dev ] || modprobe zram
+	if grep -q '^/dev/zram0 ' /proc/swaps; then exit 0; fi
+	kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+	echo 1 > $dev/reset
+	echo lzo-rle > $dev/comp_algorithm
+	echo "$((kb / 2))K" > $dev/disksize
+	mkswap -q /dev/zram0
+	swapon -p 100 /dev/zram0
+	;;
+stop)
+	swapoff /dev/zram0 || true
+	echo 1 > $dev/reset
+	;;
+esac
