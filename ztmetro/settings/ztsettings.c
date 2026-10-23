@@ -878,6 +878,8 @@ static void cell_load(void) {
 	app.mobile_data = cell.data_on;
 }
 
+static bool remote_running(void);
+
 static double draw_main(cairo_t *cr) {
 	double y = zmc_pivot_next(cr, "system", "applications", ACT_OPEN_PAGE, PAGE_APPS);
 	char detail[128], wifi[96];
@@ -942,6 +944,10 @@ static double draw_main(cairo_t *cr) {
 	y = zmc_entry(cr, y, "graphics", detail, ACT_OPEN_PAGE, PAGE_GPU);
 
 	y = zmc_entry(cr, y, "date + region", "date, time zone and regional formats", ACT_OPEN_PAGE, PAGE_DATE);
+
+	y = zmc_entry(cr, y, "remote control",
+		remote_running() ? "on: a computer can see and use the screen" : "off",
+		ACT_OPEN_PAGE, PAGE_REMOTE);
 
 	snprintf(detail, sizeof(detail), "%s, ztOS Mobile", phone->name);
 	y = zmc_entry(cr, y, "about", detail, ACT_OPEN_PAGE, PAGE_ABOUT);
@@ -1038,10 +1044,6 @@ static double draw_apps(cairo_t *cr) {
 	snprintf(detail, sizeof(detail), "%s, low power when off: %s", profiles[app.perf_profile],
 		app.perf_deepsleep ? "on" : "off");
 	y = zmc_entry(cr, y, "performance", detail, ACT_OPEN_PAGE, PAGE_PERF);
-
-	y = zmc_entry(cr, y, "remote control",
-		remote_running() ? "on: a computer can see and use the screen" : "off",
-		ACT_OPEN_PAGE, PAGE_REMOTE);
 
 	y = zmc_entry(cr, y, "developer tests", "demo tiles, slow motion, ZrnDevTest", ACT_OPEN_PAGE, PAGE_DEV);
 
