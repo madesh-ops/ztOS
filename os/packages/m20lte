@@ -24,8 +24,9 @@ bluez-utils
 # proxy
 epiphany
 # The app store as on postmarketOS: GNOME Software, Flathub apps through
-# Flatpak (no PackageKit: system packages stay with the ztOS updater); the
-# Flathub remote is added at install. rootfs/overlay/usr/local/bin/gnome-software
-# keeps it off the USB proxy
+# Flatpak (no PackageKit: system packages stay with the ztOS updater). Add
+# Flathub once: flatpak remote-add --if-not-exists flathub
+# https://dl.flathub.org/repo/flathub.flatpakrepo. rootfs/overlay/usr/local/bin/
+# gnome-software keeps it off the USB proxy
 gnome-software
 flatpak
