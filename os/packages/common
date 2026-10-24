@@ -58,6 +58,7 @@ qt6-svg
 # prebuilt apps
 yt-dlp
 mpv
+python-mpv
 cava
 nodejs
 npm
