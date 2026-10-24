@@ -116,7 +116,7 @@ is; rebuild it from the current source to include later kernel fixes.
 |---|---|
 | Shell | ztMETRO, and only ztMETRO: no other desktop is installed |
 | First start | Welcome: Start and tiles, getting around (back, the app switcher, the action centre, the keyboard), your apps, making apps |
-| Apps | Settings, ZrnDevTest, Phone, Messaging, People, Music (eco; streaming and offline playback), WhatsApp (eco; linked-device text messaging), GNOME Terminal, Firefox, Chromium |
+| Apps | Settings, ZrnDevTest, Phone, Messaging, People, Music (eco; streaming and offline playback), WhatsApp (eco; linked-device text messaging, a native client: building it needs Go), GNOME Terminal, Firefox, Chromium |
 | Updates | Command-line updater (`ztos-update check` / `apply`) and daily check; the Updates application is not preloaded yet |
 | Equalizers | Equalizer applications and EasyEffects are not preinstalled |
 | Developing | the ztOS SDK is installed (`ztos-sdk`), with its warm runtime started with the session; see `sdk/README.md` |

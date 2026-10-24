@@ -1,0 +1,4 @@
+whatsapp-native
+
+# go.mod is the module itself (the root .gitignore drops *.mod, the kernel's)
+!go.mod

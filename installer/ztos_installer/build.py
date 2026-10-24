@@ -106,6 +106,12 @@ def build_apps(stage: Path):
     from ztos_sdk import cli as sdk
     projects = (OS / "apps" / "welcome", OS / "apps" / "whatsapp", ROOT / "apps" / "music")
     for project in projects:
+        native = project / "native" / "build.sh"
+        if native.exists():
+            # WhatsApp's client is Go (whatsmeow): built before the app that carries it
+            if not shutil.which("go"):
+                raise SystemExit(f"{native} needs Go 1.25 or newer on PATH (https://go.dev/dl/)")
+            subprocess.run(["sh", str(native)], check=True)
         p = sdk.find_project(str(project))
         python = "%d.%d" % sys.version_info[:2]
         binary = sdk.build(p, "aarch64", python=python)

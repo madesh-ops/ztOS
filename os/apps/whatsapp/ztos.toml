@@ -2,13 +2,13 @@
 id = "com.zerone.whatsapp"
 name = "WhatsApp"
 caps = "WHATSAPP"
-version = "0.1.0"
+version = "0.3.0"
 entry = "main.py"
 icon = "icon.svg"
 description = "WhatsApp text messaging for ztOS"
-requires = ["nodejs", "npm", "chromium"]
+requires = ["qt6-imageformats"]   # (stickers are WebP)
 performance = "eco"
 
 [build]
-include = ["**/*.py", "**/*.js", "**/*.json", "**/*.svg"]
-exclude = ["node_modules/**"]
+# native/whatsapp-native: built by native/build.sh (Go, whatsmeow)
+include = ["**/*.py", "**/*.svg", "native/whatsapp-native"]
