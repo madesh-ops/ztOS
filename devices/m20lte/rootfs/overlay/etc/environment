@@ -4,12 +4,11 @@
 # Syntax: simple "KEY=VAL" pairs on separate lines
 #
 
-# Internet through the computer the phone is plugged into: the M20 has no Wi-Fi
-# driver yet, and devices/m20lte/scripts/usb-internet.sh, run on that computer,
-# opens a reverse SSH tunnel that is a SOCKS proxy here. Nothing else routes
-# out, so pointing everything at it costs nothing while it is down; take these
-# out once the phone has its own connection. sudo keeps them
-# (/etc/sudoers.d/10-proxy), so pacman works too.
-all_proxy=socks5h://127.0.0.1:1080
-ALL_PROXY=socks5h://127.0.0.1:1080
-no_proxy=localhost,127.0.0.1,172.16.42.0/24
+# No proxy: the phone has Wi-Fi. The USB tunnel's SOCKS proxy
+# (scripts/usb-internet.sh) is opt-in: export all_proxy=socks5h://127.0.0.1:1080
+# in the shell that needs it.
+
+# No screen reader: GTK need not look for the accessibility bus (masked, see
+# the installer), which otherwise stays running at ~27 MB
+GTK_A11Y=none
+NO_AT_BRIDGE=1

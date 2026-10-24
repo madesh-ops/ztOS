@@ -1,0 +1,18 @@
+[Unit]
+Description=Compressed swap in RAM (zram)
+# The M20 has 2.6 GB and no swap: an app frozen in the background (perfd)
+# still holds all of its memory. Pages nobody touches go to zram instead,
+# about a third of their size (lzo-rle, the only compressor this kernel
+# has built in), and the RAM they leave is free for the app in front.
+DefaultDependencies=no
+Before=swap.target
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/zrn-zram start
+ExecStop=/usr/local/bin/zrn-zram stop
+
+[Install]
+WantedBy=swap.target

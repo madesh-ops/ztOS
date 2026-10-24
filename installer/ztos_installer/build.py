@@ -321,9 +321,12 @@ fi
 if [ "$TARGET" = m20lte ]; then
 	# systemd-networkd runs the USB link's DHCP server (10-zboot-usb.network;
 	# NetworkManager leaves usb0 alone), so the computer gets 172.16.42.2
-	for u in zboot-usb-gadget zboot-firstboot zboot-hold systemd-networkd; do
+	for u in zboot-usb-gadget zboot-firstboot zboot-hold systemd-networkd zrn-zram; do
 		ch systemctl enable "$u" > /dev/null 2>&1 || echo "(no $u)"
 	done
+	# RAM: no screen reader and no Flatpak here, yet the first GTK app starts
+	# the accessibility bus and the document portal (~50 MB) for good
+	ch systemctl --global mask at-spi-dbus-bus.service xdg-document-portal.service > /dev/null 2>&1 || true
 fi
 if [ "$TARGET" = qemu ]; then
 	cat > "$R/etc/fstab" <<'FSTAB'

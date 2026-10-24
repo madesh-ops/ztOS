@@ -2,8 +2,9 @@
 # Internet for the Galaxy M20 through the computer it is plugged into, with no
 # admin rights on the computer: a reverse SSH tunnel gives the phone a SOCKS
 # proxy at 127.0.0.1:1080 that leaves through this computer's connection.
-# The phone sends everything there: /etc/environment sets all_proxy, and sudo
-# keeps it (/etc/sudoers.d/10-proxy), so pacman, curl and git just work.
+# Nothing uses it by itself (the phone has Wi-Fi): on the phone, run
+#   export all_proxy=socks5h://127.0.0.1:1080
+# in the shell that needs it, and sudo -E pacman ... to keep it for pacman.
 #
 #   devices/m20lte/scripts/usb-internet.sh [key]   (runs until Ctrl-C)
 #
