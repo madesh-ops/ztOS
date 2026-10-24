@@ -1,8 +1,9 @@
 # ztOS on the Samsung Galaxy M20 (m20lte)
 
-**Status: daily bring-up.** ztOS is installed on an SM-M205F (3 GB,
-M205FDDS9CWA2 bootloader, replacement display) and boots to ztMETRO with touch,
-GPU rendering, backlight, battery and USB networking. "Works" rows below were
+**Status: in daily use.** ztOS is installed on an SM-M205F (3 GB,
+M205FDDS9CWA2 bootloader, replacement display) and runs ztMETRO with touch,
+GPU rendering and DVFS, CPU frequency scaling, Wi-Fi, Bluetooth, sound,
+auto-rotation, backlight, battery and USB networking. "Works" rows below were
 seen on that phone; "Written" rows are untried.
 
 The Galaxy M20 (SM-M205F/G/FN) runs an Exynos 7904, which is the Exynos 7885
@@ -48,7 +49,7 @@ run. **Not started**: nothing yet, with why.
 | USB | DWC3 + "usb3p1" PHY | Works | device mode only: NCM network + ACM serial at 172.16.42.1, like the S9. The PHY is mainline's Exynos 850 code with the M20's PMU offset (0x674), its five clocks, PLL_USB at 50 MHz turned on before the PHY reset, the PIPE3 side forced idle, Samsung's HS tuning, and the controller never suspending the PHYs (each one was needed; `kernel/patch-kernel.py`, the `usbdrd` nodes) |
 | Vibration | LDO on GPP0[3] | Probes | `gpio-vibrator`: the FF_RUMBLE device ztMETRO already uses |
 | Battery level | S2MU004 fuel gauge | Works | `drivers/zrn-s2mu004-fg.c`, read-only: voltage, current, charge (5000 mAh design) |
-| Motion sensor | LSM6DSL (or LIS2DS at 0x1d), YAS539 compass | Broken | i2c_6 times out waiting for the bus idle. Samsung's tree gives these sensors no regulator, so their supply is not the cause; the pins are muxed and pulled up as in Samsung's tree. Still to try: Samsung's `i2c-sda-delay = 100` and 400 kHz (mainline runs the bus at 65 kHz), and the LIS2DS at 0x1d. Don't read this controller's registers over `/dev/mem`: once the failed probe gates its clock, that hangs the SoC |
+| Motion sensor | LSM6DSL (LIS2DS12 on some batches), YAS539 compass | Accelerometer works (ztMETRO turns apps with it); compass not started | the sensors sit behind two load switches, SENSOR_LDO_EN on GPP8[1] and SENSOR_LDO_1P8_EN on GPG3[1], which Samsung's kernel turns on at boot: off, the chips held i2c_6 low and every transfer timed out. They are fixed regulators in the DT now, switched by the st_lsm6dsx and st_accel drivers; i2c_6 runs at Samsung's 400 kHz with SDA delay 100, and Samsung's `st,orientation` is the mount matrix. Don't read this controller's registers over `/dev/mem` while its clock may be gated: that hangs the SoC |
 | Reboot to TWRP/download | PMU INFORM3 | Written | `syscon-reboot-mode`: `reboot recovery`, `reboot download` |
 | Crash log | ramoops | Registers | 2 MiB at 0xeb800000 (unused in the stock tree); read at the next ztOS boot |
 | Watchdog | WDT (A53 cluster) | Written, off | `--watchdog`; `kernel/patch-kernel.py` adds the 7885 variant (PMU bit 24). Off until the plain boot is known to work |

@@ -1,4 +1,63 @@
-# ztOS
+# ztOS for the Samsung Galaxy M20
+
+ztOS — the **ztMETRO** shell, with Windows Phone 8.1's look and motion, on Arch
+Linux ARM and mainline Linux — ported to the **Samsung Galaxy M20**
+(SM-M205F/G/FN, Exynos 7904). It runs as a daily phone on an M20: the shell,
+its apps and the GPU, with Wi-Fi, Bluetooth and sound.
+
+This port is by [madesh-ops](https://github.com/madesh-ops). ztOS itself, the
+shell, its apps, the SDK, the installer and the Galaxy S9 build, is by
+[Zerone Laboratories](https://github.com/Zerone-Laboratories/ztOS); its own
+documentation follows [below](#ztos-itself-the-galaxy-s9-build).
+
+> Alpha software. Flashing it erases the phone's user data, and you do it at
+> your own risk. The phone's identity (IMEI) and calibration are backed up and
+> never written; keep a recovery (TWRP or OrangeFox) on the phone.
+
+<table>
+<tr>
+<td align="center"><img src="docs/screenshots/m20/start.png" width="200"><br><b>Start</b>, live tiles</td>
+<td align="center"><img src="docs/screenshots/m20/firefox.png" width="200"><br><b>Firefox</b> on the GPU</td>
+<td align="center"><img src="docs/screenshots/m20/gnome-web.png" width="200"><br><b>GNOME Web</b></td>
+<td align="center"><img src="docs/screenshots/m20/calculator.png" width="200"><br><b>GTK 4</b> on the GPU</td>
+</tr>
+</table>
+
+## What works on the Galaxy M20
+
+| | |
+|---|---|
+| **Display and touch** | the 1080 x 2340 panel, multi-touch, backlight; animations at 60 fps |
+| **GPU** | Mali-G71 through Panfrost, 343-845 MHz with throttling. Screen-space derivatives are broken on this G71; a patched Mesa (`devices/m20lte/mesa/`) computes them another way, so Firefox and GTK 4 draw on the GPU |
+| **CPU** | all eight cores, frequency scaling (A73s up to 1768 MHz, A53s up to 1586 MHz) at the chip's own voltages, thermal throttling, busy threads on the fast cores |
+| **Wi-Fi, Bluetooth** | Wi-Fi (2.4 GHz, as the M20 is made), Bluetooth with BlueZ |
+| **Sound** | the speaker, through PipeWire |
+| **Sensors** | the accelerometer (apps turn with the phone), CPU and GPU temperatures, battery level |
+| **Remote control** | the screen for a VNC viewer on a computer, encrypted, from Settings |
+| **USB** | network and a serial console to a computer |
+| **Apps** | ztOS's own (Settings, People, Messaging, Music), Tube (YouTube without an account or ads), WhatsApp (a native client), GNOME Web, Firefox, Chromium, GNOME apps |
+
+Not yet: calls, SMS and mobile data (the modem), charging control, the earpiece,
+headphones and microphones, cameras, the fingerprint reader, NFC, the compass,
+proximity and light sensors, and suspend.
+
+Every part, how it is done and what is left:
+[devices/m20lte/README.md](devices/m20lte/README.md).
+
+## Installing it on a Galaxy M20
+
+```
+installer/ztos guide --target m20lte     # read first
+installer/ztos install --target m20lte
+```
+
+It needs an unlocked bootloader, TWRP or OrangeFox for the M20 on the RECOVERY
+partition, `adb`, and the phone in recovery. The phone's stock BOOT, RECOVERY,
+EFS and CPEFS are saved before anything is written. For GPU-drawn Firefox and
+GTK 4 apps, build the patched Mesa on the phone afterwards
+(`devices/m20lte/mesa/build-mesa.sh`).
+
+## ztOS itself: the Galaxy S9 build
 
 **ALPHA-2** — Galaxy S9 (SM-G960N / starlte) build.
 
@@ -6,9 +65,7 @@ ztOS is a phone operating system: the **ztMETRO** shell (Windows Phone 8.1's
 look and motion) on Arch Linux ARM and mainline Linux, with its own apps, an
 updater and an SDK for apps in Python and Qt. The ztMETRO Shell and its components are written in C, and accelerated with OpenGL. Currently its ported for a Samsung Galaxy
 S9 (starlte), and I am hoping to expand supports for more devices in the future :).
-A port to the Samsung Galaxy M20 (m20lte) is in bring-up: its kernel boots to
-ztOS's rescue shell over USB, and the system itself is not installed yet. See
-[devices/m20lte/README.md](devices/m20lte/README.md).
+The Galaxy M20 port is described [at the top](#ztos-for-the-samsung-galaxy-m20).
 
 > This ROM is in very much Alpha, The installer is not tested on real hardware, open a issue in this github repo if you have any issues with it
 
