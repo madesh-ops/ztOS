@@ -33,7 +33,7 @@ import zipfile
 from typing import Callable, Iterable, Optional, Union
 
 
-from PySide6.QtCore import (QByteArray, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer,
+from PySide6.QtCore import (QSocketNotifier, QByteArray, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer,
                             QVariantAnimation, SIGNAL, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QPainter, QPainterPath, QPen,
                            QImage, QPixmap, QRegion, QTransform)
@@ -169,16 +169,20 @@ def _live_path() -> str:
     return os.path.join(runtime, "ztos-live", manifest().get("id", "ztos.app"))
 
 
-def tile_update(title: str = "", lines=(), count: int = 0) -> None:
+def tile_update(title: str = "", lines=(), count: int = 0, image: str = "") -> None:
     """Make this app's Start tile live, as a Windows Phone Flip tile: now and
     then it turns over to a back with up to three `lines` at the top and
     `title` along the bottom; `count` (if not 0) sits on the front's corner.
+    With `image` (a picture file's path) the back is that picture edge to
+    edge, the title and the first line on it, as the Music and Photos tiles.
     Small tiles keep still. Kept until tile_clear() or the session ends."""
     clean = lambda s: str(s).replace("\n", " ").strip()
     path = _live_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     body = f"title={clean(title)}\n" + "".join(f"line={clean(l)}\n" for l in list(lines)[:3])
     body += f"count={int(count)}\n"
+    if image:
+        body += f"image={clean(image)}\n"
     with open(path + ".new", "w") as f:
         f.write(body)
     os.replace(path + ".new", path)
@@ -1528,13 +1532,13 @@ class RoundButton(_Pressable):
             if glyph.endswith(".svg"):
                 from PySide6.QtSvg import QSvgRenderer
                 self._svg = QSvgRenderer(QByteArray(resource(glyph)))
-            self.update()
+            self.redraw()           # (update() alone would copy the old picture again)
 
     def set_label(self, label: str):
         if self._label != label:
             self._label = label
             self.setFixedSize(68, 74 if label else 52)
-            self.update()
+            self.redraw()
 
     def draw(self, p: QPainter):
         p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
@@ -2705,6 +2709,32 @@ class App:
     """The app: its window, and the pages in it one in front of another."""
     current: Optional["App"] = None
 
+    def _quit_on_term(self):
+        """SIGTERM (the app switcher's close sends one) ends the app as a quit
+        does: aboutToQuit runs, so an app's goodbyes (its live tile cleared,
+        its player saved) are not skipped. Python can only see the signal
+        when it runs, so the signal wakes Qt's loop through a socket."""
+        import signal
+        import socket
+        try:
+            r, w = socket.socketpair()
+            r.setblocking(False)
+            w.setblocking(False)
+            signal.set_wakeup_fd(w.fileno())
+        except (ValueError, OSError):
+            return      # (not the main thread)
+        signal.signal(signal.SIGTERM, lambda *_: None)
+        self._term = (r, w, QSocketNotifier(r.fileno(), QSocketNotifier.Read))
+
+        def woke():
+            try:
+                got = r.recv(64)
+            except (BlockingIOError, InterruptedError):
+                return
+            if signal.SIGTERM in got:
+                self.qt.quit()
+        self._term[2].activated.connect(woke)
+
     def __init__(self, argv: Optional[list] = None):
         self.qt = QApplication.instance() or QApplication(argv if argv is not None else sys.argv)
         info = manifest()
@@ -2728,6 +2758,7 @@ class App:
         fonts = ", ".join(f'"{f}"' if " " in f else f for f in FONT_REGULAR)
         self.qt.setStyleSheet(_STYLE % {"fonts": fonts, "accent": accent().name()})
         App.current = self
+        self._quit_on_term()
         self._dialogs: list = []
         if info.get("performance") in ("eco", "big"):
             performance(info["performance"])
@@ -2814,6 +2845,11 @@ class App:
             return
         if self._dialogs:
             self._dialogs[-1].close_with(None)      # a message first
+            return
+        menus = [m for m in self.window.findChildren(_Menu) if m.isVisible()]
+        if menus:
+            menus[-1].close()                       # then a hold menu
+            menus[-1].deleteLater()
             return
         page = self.page
         if page is not None and hasattr(page, "back") and page.back():
