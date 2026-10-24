@@ -58,6 +58,7 @@
 #include <linux/input.h>
 #include <linux/netlink.h>
 #include <pango/pangocairo.h>
+#include <gio/gio.h>	/* (GSettings: Clocks' alarms, for its tile) */
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
 #include <wlr/interfaces/wlr_keyboard.h>
@@ -3152,6 +3153,114 @@ static void live_tick(struct zt_server *server) {
 	}
 }
 
+/* ---- the Clocks tile ------------------------------------------------------------
+ *
+ * GNOME Clocks' tile (command gnome-clocks) gets a back as any live tile does
+ * (live_read), written here on the minute (clock_tick): the time as the status
+ * row shows it, the date, and the next alarm. The alarms are Clocks' own,
+ * GSettings org.gnome.clocks "alarms": one that is on has a ring_time, the
+ * next time it rings (a snooze included). */
+#define CLOCK_TILE "gnome-clocks"
+
+static bool clock_tile_pinned(struct zt_server *server) {
+	char key[128];
+	for (int i = 0; i < server->n_tiles; i++) {
+		tile_key(&server->tiles[i], key, sizeof(key));
+		if (strcmp(key, CLOCK_TILE) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* The next alarm, as "07:00", "07:00 tomorrow" or "07:00 Mon"; false if none */
+static bool clock_next_alarm(char *out, size_t size) {
+	static GSettings *clocks;
+	static bool looked;
+	if (!looked) {
+		looked = true;
+		GSettingsSchemaSource *source = g_settings_schema_source_get_default();
+		GSettingsSchema *schema = source ?
+			g_settings_schema_source_lookup(source, "org.gnome.clocks", TRUE) : NULL;
+		if (schema) {	/* (without Clocks installed there is nothing to read) */
+			clocks = g_settings_new_full(schema, NULL, NULL);
+			g_settings_schema_unref(schema);
+		}
+	}
+	if (!clocks) {
+		return false;
+	}
+	GVariant *alarms = g_settings_get_value(clocks, "alarms");
+	GDateTime *now = g_date_time_new_now_local(), *next = NULL;
+	GVariantIter alarm_iter;
+	GVariant *alarm;
+	g_variant_iter_init(&alarm_iter, alarms);
+	while ((alarm = g_variant_iter_next_value(&alarm_iter))) {
+		const char *ring = NULL;
+		if (g_variant_lookup(alarm, "ring_time", "&s", &ring)) {
+			GDateTime *when = g_date_time_new_from_iso8601(ring, NULL);
+			if (when && g_date_time_compare(when, now) > 0 &&
+			    (!next || g_date_time_compare(when, next) < 0)) {
+				if (next) {
+					g_date_time_unref(next);
+				}
+				next = g_date_time_to_local(when);
+			}
+			if (when) {
+				g_date_time_unref(when);
+			}
+		}
+		g_variant_unref(alarm);
+	}
+	g_variant_unref(alarms);
+	if (next) {
+		/* calendar days apart (midnight to midnight, a new year included) */
+		GDateTime *d0 = g_date_time_new_local(g_date_time_get_year(now),
+			g_date_time_get_month(now), g_date_time_get_day_of_month(now), 0, 0, 0);
+		GDateTime *d1 = g_date_time_new_local(g_date_time_get_year(next),
+			g_date_time_get_month(next), g_date_time_get_day_of_month(next), 0, 0, 0);
+		int days = (int)((g_date_time_difference(d1, d0) + G_TIME_SPAN_HOUR) / G_TIME_SPAN_DAY);
+		g_date_time_unref(d0);
+		g_date_time_unref(d1);
+		char *hm = g_date_time_format(next, "%H:%M");
+		char *day = g_date_time_format(next, "%a");
+		snprintf(out, size, "%s%s%s", hm, days == 0 ? "" : " ",
+			days == 0 ? "" : days == 1 ? "tomorrow" : day);
+		g_free(hm);
+		g_free(day);
+		g_date_time_unref(next);
+	}
+	g_date_time_unref(now);
+	return next != NULL;
+}
+
+static void clock_live_write(struct zt_server *server) {
+	if (!clock_tile_pinned(server)) {
+		return;
+	}
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	char dir[256], path[384], tmp[400], hm[16], date[64], alarm[48];
+	snprintf(dir, sizeof(dir), "%s/ztos-live", runtime ? runtime : "/tmp");
+	mkdir(dir, 0700);
+	snprintf(path, sizeof(path), "%s/" CLOCK_TILE, dir);
+	snprintf(tmp, sizeof(tmp), "%s.new", path);
+	time_t t = time(NULL);
+	struct tm tm;
+	localtime_r(&t, &tm);
+	strftime(hm, sizeof(hm), "%H:%M", &tm);	/* (as the status row has it) */
+	strftime(date, sizeof(date), "%A, %-d %B", &tm);
+	FILE *f = fopen(tmp, "w");
+	if (!f) {
+		return;
+	}
+	fprintf(f, "line=%s\nline=%s\n", hm, date);
+	if (clock_next_alarm(alarm, sizeof(alarm))) {
+		fprintf(f, "line=alarm %s\n", alarm);
+	}
+	fclose(f);
+	rename(tmp, path);
+}
+
 /* A long line on a live tile's back sweeps across, the way Windows Phone
  * marquees what does not fit: it rests at its start, slides until its end
  * shows, rests there, and starts again. `m` maps the unit square onto the
@@ -4521,6 +4630,7 @@ static int clock_tick(void *data) {
 			draw_shade(server);
 		}
 	}
+	clock_live_write(server);	/* (the Clocks tile's back) */
 	time_t now = time(NULL);
 	wl_event_source_timer_update(server->clock_timer, (60 - now % 60) * 1000 + 50);
 	return 0;
