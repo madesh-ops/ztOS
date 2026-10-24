@@ -254,6 +254,7 @@ struct tile {
 	 * $XDG_RUNTIME_DIR/ztos-live/<its command's name> (see live_read) */
 	bool live;
 	char live_title[48], live_lines[3][128];
+	char live_image[256];	/* a picture for the whole back (a song's cover, a photo) */
 	int live_count;
 	/* back lines too long for the tile, each drawn on its own to sweep
 	 * across (see draw_tile_back and the tile loop) */
@@ -378,6 +379,7 @@ enum touch_role {
 	ROLE_SHADE,	/* dragging or interacting with the status bar shade / Action Center */
 	ROLE_MENU,	/* while the app list's menu is open */
 	ROLE_HYPER,	/* on Hyperscan, the search over everything */
+	ROLE_POWER,	/* pulling the "slide down to power off" curtain */
 };
 
 struct touch_point {
@@ -578,6 +580,20 @@ struct zt_server {
 	bool wifi_suspend;
 	bool wifi_suspended_by_sleep;
 	float lock_y;			/* 0 covering the screen, -height pushed off the top */
+	/* "slide down to power off" (Windows Phone 8.1): the power key held drops
+	 * a curtain of the lock photo from the top; pulled to the bottom, the
+	 * phone goes off. power_y is its lower edge, points from the top: 0
+	 * away, POWER_PEEK resting, the screen's height gone down */
+	float power_y;
+	float power_dark;		/* 0..1: the black it leaves behind it */
+	bool power_open;		/* down and waiting for the finger */
+	bool power_going;		/* let go far enough: on its way to off */
+	bool power_key_down, power_held;
+	int power_stage;		/* power_off_timer's steps: 1 dark, 2 off */
+	bool power_lock;		/* held on the lock screen: it is the lock screen
+					 * itself that comes down, the words above it */
+	struct zt_layer power_layer, power_text_layer;
+	struct wl_event_source *power_hold_timer, *power_idle_timer, *power_off_timer;
 	bool keypop;			/* the pressed key shown enlarged above the finger */
 	float keypop_x, keypop_y;
 	float shade_h;			/* pull-down height of the Action Center shade */
@@ -3010,6 +3026,9 @@ static void draw_tile(struct zt_server *server, int i) {
  *	title=Back title		along the bottom, where the front's name is
  *	line=First line			up to three, at the top
  *	count=3				on the front's corner (0: none)
+ *	image=/path/to/picture.jpg	the whole back, as the Music and Photos
+ *					tiles have it: the title and the first
+ *					line then sit on it, at the bottom
  *
  * The SDK writes it (ztos.tile_update). Start then turns the tile over now
  * and then, about its horizontal axis, and back again: a random 4 to 10 s
@@ -3040,6 +3059,36 @@ static void draw_tile_back(struct zt_server *server, int i) {
 		set_rgb(cr, t->color);
 	}
 	cairo_paint(cr);
+	cairo_surface_t *picture = t->live_image[0] ?
+		image_cover(t->live_image, (int)ceil(t->w * server->scale), (int)ceil(t->h * server->scale)) : NULL;
+	if (picture) {
+		/* the picture edge to edge, a shade up from the bottom for the words */
+		cairo_save(cr);
+		cairo_scale(cr, 1.0 / server->scale, 1.0 / server->scale);
+		cairo_set_source_surface(cr, picture, 0, 0);
+		cairo_paint(cr);
+		cairo_restore(cr);
+		cairo_surface_destroy(picture);
+		cairo_pattern_t *shade = cairo_pattern_create_linear(0, t->h * 0.45, 0, t->h);
+		cairo_pattern_add_color_stop_rgba(shade, 0.0, 0, 0, 0, 0.0);
+		cairo_pattern_add_color_stop_rgba(shade, 1.0, 0, 0, 0, 0.7);
+		cairo_set_source(cr, shade);
+		cairo_paint(cr);
+		cairo_pattern_destroy(shade);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		for (int k = 0; k < 3; k++) {
+			t->sweep_w[k] = 0;
+		}
+		if (t->live_lines[0][0]) {
+			draw_text(cr, t->live_lines[0], FONT_SEMIBOLD, BACK_LINE_SIZE(t), 8, t->h - 44,
+				t->w - 16, 0, false);
+		}
+		draw_text(cr, t->live_title[0] ? t->live_title : t->label, FONT_REGULAR, 13, 8, t->h - 23,
+			t->w - 16, 0, false);
+		g_dump_name = "tile-back";
+		zt_buffer_show(server, &t->back_layer, buffer, cr, t->w, t->h);
+		return;
+	}
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	double size = BACK_LINE_SIZE(t);
 	for (int k = 0; k < 3; k++) {
@@ -3095,9 +3144,10 @@ static void live_read(struct zt_server *server) {
 		if (!f) {
 			continue;
 		}
-		char line[160];
+		char line[400];	/* (an image= path is long) */
 		int n = 0;
 		t->live_title[0] = 0;
+		t->live_image[0] = 0;
 		memset(t->live_lines, 0, sizeof(t->live_lines));
 		t->live_count = 0;
 		while (fgets(line, sizeof(line), f)) {
@@ -3108,6 +3158,8 @@ static void live_read(struct zt_server *server) {
 				snprintf(t->live_lines[n++], sizeof(t->live_lines[0]), "%s", line + 5);
 			} else if (strncmp(line, "count=", 6) == 0) {
 				t->live_count = atoi(line + 6);
+			} else if (strncmp(line, "image=", 6) == 0) {
+				snprintf(t->live_image, sizeof(t->live_image), "%s", line + 6);
 			}
 		}
 		fclose(f);
@@ -3118,6 +3170,7 @@ static void live_read(struct zt_server *server) {
 		t->live_mtime = mtime;
 		if (server->width > 0) {
 			draw_tile_back(server, i);
+			g_dump_name = "tile-front";	/* (--render: not over the back's picture) */
 			draw_tile(server, i);	/* its count, on the front */
 		}
 	}
@@ -4505,6 +4558,188 @@ static void lock(struct zt_server *server) {
 	wlr_log(WLR_INFO, "locked");
 }
 
+/* ---- slide down to power off ------------------------------------------------------
+ *
+ * As Windows Phone 8.1 does it: the power key held for a second, and the
+ * lock screen's photo comes down from the top as a curtain, a third of the
+ * way, "slide down to power off" along its lower edge; the screen under it
+ * dims. It follows the finger; let go past half way (or thrown down) it
+ * falls the rest, the screen goes black and the phone off. Let go sooner it
+ * springs back; a tap under it, the power key again, or 8 s untouched and it
+ * goes back up. On the lock screen there is no second photo: the lock screen
+ * itself comes down, the words on black above it, and is pulled down. */
+#define POWER_PEEK(s)	((float)(s)->height * 0.32f)
+#define POWER_IDLE_MS	8000
+#define POWER_STRIP	120.0	/* the words over a lock screen pulled down: their band */
+
+static void screen_set(struct zt_server *server, bool on);
+static void activity(struct zt_server *server);
+static void run_detached(const char *program, const char *a1, const char *a2, const char *a3);
+
+static void draw_power(struct zt_server *server) {
+	cairo_t *cr;
+	double w = server->width, h = server->height;
+	struct zt_buffer *buffer = zt_buffer_create(server, w, h, &cr);
+	double r = ((server->accent >> 16) & 0xff) / 255.0, g = ((server->accent >> 8) & 0xff) / 255.0,
+		b = (server->accent & 0xff) / 255.0;
+	cairo_set_source_rgb(cr, r * 0.5, g * 0.5, b * 0.5);
+	cairo_paint(cr);
+	if (server->lock_wall) {
+		cairo_save(cr);
+		cairo_scale(cr, 1.0 / server->scale, 1.0 / server->scale);
+		cairo_set_source_surface(cr, server->lock_wall, 0, 0);
+		cairo_paint(cr);
+		cairo_restore(cr);
+	}
+	/* a shade up from its lower edge, for the words */
+	cairo_pattern_t *shade = cairo_pattern_create_linear(0, h - 170, 0, h);
+	cairo_pattern_add_color_stop_rgba(shade, 0.0, 0, 0, 0, 0.0);
+	cairo_pattern_add_color_stop_rgba(shade, 1.0, 0, 0, 0, 0.55);
+	cairo_set_source(cr, shade);
+	cairo_paint(cr);
+	cairo_pattern_destroy(shade);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	draw_text(cr, "slide down to power off", FONT_SEMILIGHT, 24, 0, h - 92, w, 0, true);
+	/* the arrow under the words: the way to pull */
+	double cx = w / 2, cy = h - 34;
+	cairo_set_line_width(cr, 2.0);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
+	cairo_move_to(cr, cx, cy - 18);
+	cairo_line_to(cr, cx, cy + 6);
+	cairo_move_to(cr, cx - 10, cy - 4);
+	cairo_line_to(cr, cx, cy + 6);
+	cairo_line_to(cr, cx + 10, cy - 4);
+	cairo_stroke(cr);
+	g_dump_name = "power";
+	zt_buffer_show(server, &server->power_layer, buffer, cr, w, h);
+}
+
+static void draw_power_text(struct zt_server *server) {
+	cairo_t *cr;
+	double w = server->width, h = POWER_STRIP;
+	struct zt_buffer *buffer = zt_buffer_create(server, w, h, &cr);
+	cairo_set_source_rgb(cr, 0, 0, 0);
+	cairo_paint(cr);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	draw_text(cr, "slide down to power off", FONT_SEMILIGHT, 24, 0, 28, w, 0, true);
+	double cx = w / 2, cy = 86;
+	cairo_set_line_width(cr, 2.0);
+	cairo_set_line_cap(cr, CAIRO_LINE_CAP_SQUARE);
+	cairo_move_to(cr, cx, cy - 18);
+	cairo_line_to(cr, cx, cy + 6);
+	cairo_move_to(cr, cx - 10, cy - 4);
+	cairo_line_to(cr, cx, cy + 6);
+	cairo_line_to(cr, cx + 10, cy - 4);
+	cairo_stroke(cr);
+	g_dump_name = "power-text";
+	zt_buffer_show(server, &server->power_text_layer, buffer, cr, w, h);
+}
+
+static void power_show(struct zt_server *server) {
+	if (server->width == 0 || server->power_going) {
+		return;
+	}
+	if (!server->screen_on) {
+		screen_set(server, true);
+	}
+	activity(server);
+	server->power_lock = server->locked;
+	if (server->power_lock) {
+		draw_power_text(server);
+	} else {
+		draw_power(server);
+	}
+	server->power_open = true;
+	hap(server, HAP_HEAVY, HG_SYSTEM);
+	/* it comes down quick and settles, as a dropped blind does */
+	animate_spring(server, &server->power_y, POWER_PEEK(server), 420, 0.06f);
+	wl_event_source_timer_update(server->power_idle_timer, POWER_IDLE_MS);
+	wlr_log(WLR_INFO, "power: slide down to power off");
+}
+
+static void power_hide(struct zt_server *server) {
+	if (!server->power_open || server->power_going) {
+		return;
+	}
+	server->power_open = false;
+	wl_event_source_timer_update(server->power_idle_timer, 0);
+	animate(server, &server->power_y, 0.0f, 260, 0, false);
+}
+
+static void power_go(struct zt_server *server, float speed) {
+	server->power_going = true;
+	wl_event_source_timer_update(server->power_idle_timer, 0);
+	/* down the rest at the speed it was let go, not slower than a fall */
+	float left = (float)server->height - server->power_y;
+	uint32_t ms = (uint32_t)(left / fmaxf(speed, 2.0f));
+	ms = ms < 90 ? 90 : ms > 260 ? 260 : ms;
+	animate(server, &server->power_y, (float)server->height, ms, 0, true);
+	hap(server, HAP_CLICK, HG_SYSTEM);
+	server->power_stage = 1;
+	wl_event_source_timer_update(server->power_off_timer, ms + 120);
+	wlr_log(WLR_INFO, "power: going off");
+}
+
+static int power_off_step(void *data) {
+	struct zt_server *server = data;
+	if (server->power_stage == 1) {
+		animate(server, &server->power_dark, 1.0f, 450, 0, false);	/* the photo fades to black */
+		server->power_stage = 2;
+		wl_event_source_timer_update(server->power_off_timer, 650);
+	} else if (server->power_stage == 2) {
+		server->power_stage = 3;
+		/* logind lets the session's own user power off; sudo if not */
+		run_detached("/bin/sh", "-c", "systemctl poweroff || sudo -n systemctl poweroff || poweroff", NULL);
+	}
+	return 0;
+}
+
+/* the key still down a second after it went down */
+static int power_held(void *data) {
+	struct zt_server *server = data;
+	if (server->power_key_down) {
+		server->power_held = true;
+		power_show(server);
+	}
+	return 0;
+}
+
+static int power_idle(void *data) {
+	power_hide(data);
+	return 0;
+}
+
+/* the curtain over everything (it is drawn last but the touch dots) */
+static void power_render(struct zt_server *server) {
+	if (server->power_y < 0.5f && server->power_dark <= 0.0f) {
+		return;
+	}
+	float m[16];
+	if (server->power_lock) {
+		/* black above the lock screen (which render() drew moved down), the
+		 * words just over its top edge */
+		if (server->power_y >= 0.5f) {
+			mat_identity(m);
+			mat_scale(m, server->width, server->power_y);
+			quad(server, GL_TEXTURE_2D, server->black_tex, m, 1.0f, false, false, 1.0f, 1.0f);
+			if (server->power_text_layer.tex) {
+				layer_draw(server, &server->power_text_layer, 0, server->power_y - (float)POWER_STRIP, 1.0f);
+			}
+		}
+	} else if (server->power_y >= 0.5f && server->power_layer.tex) {
+		float dim = fminf(1.0f, server->power_y / POWER_PEEK(server));
+		mat_identity(m);
+		mat_scale(m, server->width, server->height);
+		quad(server, GL_TEXTURE_2D, server->black_tex, m, 0.6f * dim, false, false, 1.0f, 1.0f);
+		layer_draw(server, &server->power_layer, 0, server->power_y - (float)server->height, 1.0f);
+	}
+	if (server->power_dark > 0.0f) {
+		mat_identity(m);
+		mat_scale(m, server->width, server->height);
+		quad(server, GL_TEXTURE_2D, server->black_tex, m, fminf(1.0f, server->power_dark), false, false, 1.0f, 1.0f);
+	}
+}
+
 /* Once a second, and only while the screen is on: whether the network in use
  * carried anything since the last look (its arrow shows for as long as it
  * does), and the plug in the battery while it charges. */
@@ -4917,6 +5152,41 @@ static void load_logo(struct zt_server *server) {
 	}
 }
 
+/* The Start button's mark, as Windows Phone 8.1's: a window of four panes
+ * seen from a little to its left (the left edge shorter than the right),
+ * thin gaps between them. In the source colour, `size` points wide, about
+ * (cx, cy). */
+static void draw_start_mark(cairo_t *cr, double cx, double cy, double size) {
+	const double slant = 0.12;	/* how much shorter the left edge is, top and bottom */
+	const double gap = 0.07;	/* between the panes */
+	const double split = 0.45;	/* the upright gap: left of the middle, nearer is wider */
+	double x0 = cx - size / 2, y0 = cy - size / 2;
+	/* the outline's top and bottom at u (0 left, 1 right), in the unit square */
+#define TOP(u)	(slant * (1.0 - (u)))
+#define BOT(u)	(1.0 - slant * (1.0 - (u)))
+	const double cols[2][2] = { { 0.0, split - gap / 2 }, { split + gap / 2, 1.0 } };
+	for (int c = 0; c < 2; c++) {
+		double ua = cols[c][0], ub = cols[c][1];
+		/* the middle line runs level, as the panes' sills do */
+		double mid_a = (TOP(ua) + BOT(ua)) / 2, mid_b = (TOP(ub) + BOT(ub)) / 2;
+		/* upper pane */
+		cairo_move_to(cr, x0 + ua * size, y0 + TOP(ua) * size);
+		cairo_line_to(cr, x0 + ub * size, y0 + TOP(ub) * size);
+		cairo_line_to(cr, x0 + ub * size, y0 + (mid_b - gap / 2) * size);
+		cairo_line_to(cr, x0 + ua * size, y0 + (mid_a - gap / 2) * size);
+		cairo_close_path(cr);
+		/* lower pane */
+		cairo_move_to(cr, x0 + ua * size, y0 + (mid_a + gap / 2) * size);
+		cairo_line_to(cr, x0 + ub * size, y0 + (mid_b + gap / 2) * size);
+		cairo_line_to(cr, x0 + ub * size, y0 + BOT(ub) * size);
+		cairo_line_to(cr, x0 + ua * size, y0 + BOT(ua) * size);
+		cairo_close_path(cr);
+	}
+#undef TOP
+#undef BOT
+	cairo_fill(cr);
+}
+
 static void draw_nav(struct zt_server *server) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, NAV_H, &cr);
@@ -4946,10 +5216,8 @@ static void draw_nav(struct zt_server *server) {
 				draw_icon(cr, "search", cx, cy, 20);
 			}
 		} else {
-			/* the Start button carries the system's name */
-			/* semilight: its stems are as thick as the arrow and the lens */
-			draw_text(cr, "ZRN", FONT_SEMILIGHT, 17, cx - 40, 0, 80, NAV_H, true);
-			cairo_new_path(cr);	/* text leaves a current point behind */
+			/* the Start button: the window of four panes */
+			draw_start_mark(cr, cx, cy, 19);
 		}
 		cairo_restore(cr);
 	}
@@ -8382,6 +8650,20 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		p->role = ROLE_NONE;
 		return;
 	}
+	if (server->power_going) {
+		p->role = ROLE_NONE;
+		return;
+	}
+	if (server->power_open) {
+		if (server->power_lock || y <= server->power_y + 40) {
+			p->role = ROLE_POWER;
+			wl_event_source_timer_update(server->power_idle_timer, POWER_IDLE_MS);
+		} else {
+			power_hide(server);	/* a tap under it: not now */
+			p->role = ROLE_NONE;
+		}
+		return;
+	}
     if (server->auth_active && y >= server->height-NAV_H) { p->role = ROLE_NONE; return; }
 	if (server->dialog_open && server->dialog_y > (float)-server->dialog_h + 10.0f &&
             !(server->auth_active && server->osk_visible && y >= server->height-NAV_H-server->osk_h)) {
@@ -8722,6 +9004,15 @@ static void touch_update(struct zt_server *server, int32_t id, double x, double 
 		}
 		damage(server);
 		break;
+	case ROLE_POWER:
+		if (server->power_open && !server->power_going) {
+			float to = POWER_PEEK(server) + (float)(y - p->y0);
+			float peek = POWER_PEEK(server);
+			server->power_y = to < peek ? peek + (to - peek) * 0.3f : fminf(to, (float)server->height);
+			wl_event_source_timer_update(server->power_idle_timer, POWER_IDLE_MS);
+			damage(server);
+		}
+		break;
 	case ROLE_LOCK:
 		if (p->moved && server->locked) {
 			/* it goes up with the finger, and no lower than where it sits */
@@ -8932,6 +9223,18 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 			} else {
 				animate(server, &server->drop, 0.0f, 260, 0, false);
 			}
+		}
+		break;
+	case ROLE_POWER:
+		if (!server->power_open || server->power_going) {
+			break;
+		}
+		if (!cancelled && (server->power_y > server->height * 0.55f || (p->moved && p->vy > 1.2f))) {
+			power_go(server, p->vy);
+		} else if (server->power_lock && !p->moved) {
+			power_hide(server);	/* a tap on the lock screen: not now */
+		} else {
+			animate_spring(server, &server->power_y, POWER_PEEK(server), 320, 0.05f);
 		}
 		break;
 	case ROLE_LOCK:
@@ -9407,6 +9710,13 @@ static void ctl_command(struct zt_server *server, char *line) {
 		damage(server);
 	} else if (sscanf(line, "volume %d", &id) == 1) {
 		volume_step(server, id);
+	} else if (strncmp(line, "power_menu", 10) == 0) {
+		/* power_menu: as if the power key were held; "power_menu hide" */
+		if (strstr(line, "hide")) {
+			power_hide(server);
+		} else {
+			power_show(server);
+		}
 	} else if (strncmp(line, "screen off", 10) == 0) {
 		screen_set(server, false);
 	} else if (strncmp(line, "screen on", 9) == 0) {
@@ -9520,8 +9830,25 @@ static void keyboard_handle_key(struct wl_listener *listener, void *data) {
 	struct zt_server *server = keyboard->server;
 	struct wlr_keyboard_key_event *event = data;
 	if (event->keycode == KEY_POWER) {
-		/* the power key sleeps and wakes the screen, and goes no further */
+		/* the power key sleeps and wakes the screen (as it comes up), and goes
+		 * no further; held a second, "slide down to power off" */
 		if (event->state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+			server->power_key_down = true;
+			server->power_held = false;
+			wl_event_source_timer_update(server->power_hold_timer, 1000);
+		} else {
+			bool held = server->power_held;
+			server->power_key_down = false;
+			server->power_held = false;
+			wl_event_source_timer_update(server->power_hold_timer, 0);
+			if (held || server->power_going) {
+				return;		/* it brought the curtain: it stays */
+			}
+			if (server->power_open) {
+				power_hide(server);	/* pressed again: put it away, the screen stays on */
+				activity(server);
+				return;
+			}
 			screen_set(server, !server->screen_on);
 			if (server->screen_on) {
 				activity(server);
@@ -10309,8 +10636,10 @@ static void render_frame(struct zt_server *server, bool show) {
 		layer_draw(server, &server->keypop_layer, server->keypop_x, server->keypop_y, 1.0f);
 	}
 	if (server->lock_layer.tex && (server->locked || server->lock_y > 1.0f - server->height)) {
-		layer_draw(server, &server->lock_layer, 0, server->lock_y, 1.0f);
-		plug_over(server, server->lock_y);
+		/* (held power: the lock screen comes down, see power_render) */
+		float ly = server->lock_y + (server->power_lock ? server->power_y : 0.0f);
+		layer_draw(server, &server->lock_layer, 0, ly, 1.0f);
+		plug_over(server, ly);
 	}
 	if (server->splash && !animating(server, &server->lock_y) && server->lock_y >= 0.0f) {
 		server->splash = false;
@@ -10333,6 +10662,7 @@ static void render_frame(struct zt_server *server, bool show) {
 		}
 		layer_draw(server, &server->dialog_layer, 0, server->dialog_y, 1.0f);
 	}
+	power_render(server);
 	if (server->show_touches) {
 		for (int i = 0; i < MAX_TOUCH; i++) {
 			struct touch_point *p = &server->touches[i];
@@ -10808,6 +11138,9 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 	}
 	g_dump_name = "lock";
 	draw_lock(server);
+	draw_power(server);		/* power.png */
+	draw_power_text(server);	/* power-text.png: its words over a lock screen */
+	live_read(server);		/* tile-back.png: the last live tile's back */
 	load_apps(server);
 	hyper_open(server);	/* saved as hyperscan.png: empty, then a query */
 	snprintf(server->hyper_q, sizeof(server->hyper_q), "%s", getenv("ZTMETRO_HYPER") ? getenv("ZTMETRO_HYPER") : "th");
@@ -10994,6 +11327,9 @@ int main(int argc, char *argv[]) {
 	server.launch_timer = wl_event_loop_add_timer(server.loop, launch_timed_out, &server);
 	server.volume_timer = wl_event_loop_add_timer(server.loop, volume_hide, &server);
 	server.peek_timer = wl_event_loop_add_timer(server.loop, peek_timed_out, &server);
+	server.power_hold_timer = wl_event_loop_add_timer(server.loop, power_held, &server);
+	server.power_idle_timer = wl_event_loop_add_timer(server.loop, power_idle, &server);
+	server.power_off_timer = wl_event_loop_add_timer(server.loop, power_off_step, &server);
 	server.net_timer = wl_event_loop_add_timer(server.loop, net_tick, &server);
 	wl_event_source_timer_update(server.net_timer, 3000);
 	server.st_plug = 1.0f;
