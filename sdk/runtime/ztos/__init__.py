@@ -33,7 +33,7 @@ import zipfile
 from typing import Callable, Iterable, Optional, Union
 
 
-from PySide6.QtCore import (QSocketNotifier, QByteArray, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer,
+from PySide6.QtCore import (QSocketNotifier, QByteArray, QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer,
                             QVariantAnimation, SIGNAL, Signal)
 from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QPainter, QPainterPath, QPen,
                            QImage, QPixmap, QRegion, QTransform)
@@ -1579,11 +1579,19 @@ class AppBar(QWidget):
         self.setStyleSheet("background: #1f1f1f;")
         self.setFixedHeight(80)
         self._row = QHBoxLayout(self)
-        self._row.setContentsMargins(MARGIN, 2, MARGIN, 4)
+        # the buttons sit together in the middle; the edges and gaps only
+        # matter when the bar is full: five buttons fit a 360-point phone
+        self._row.setContentsMargins(4, 2, 4, 4)
+        self._row.setSpacing(0)
         self._row.addStretch(1)
         for b in buttons:
             self.add(b)
         self._row.addStretch(1)
+
+    def minimumSizeHint(self) -> QSize:
+        # never the reason the window grows wider than the screen (the shell
+        # then shrinks the whole app to fit, and the page turning in shows)
+        return QSize(0, 80)
 
     def add(self, button: RoundButton) -> RoundButton:
         self._row.insertWidget(self._row.count() - 1, button)
@@ -2507,15 +2515,8 @@ class _Turnstile(_Moving):
         self.setGeometry(host.rect())
         self.before, self.after, self.out_rows, self.in_rows = before, after, out_rows, in_rows
         self.back, self.entrance, self.done = back, entrance, done
-        self.out_ms = _rows_ms(out_rows, ROW_OUT_MS) if before is not None else 0.0
-        self.in_start = self.out_ms + (GAP_MS if before is not None and after is not None else 0)
-        if after is None:
-            self.total = self.out_ms
-        elif entrance:
-            last = max((b[2] for b in in_rows), default=0)
-            self.total = self.in_start + max(last * ENTER_STAGGER_MS + ENTER_ROW_MS, ENTER_TITLE_MS)
-        else:
-            self.total = self.in_start + _rows_ms(in_rows, ROW_IN_MS)
+        self.held = False
+        self._times()
         self.start = start if start is not None else _now()
         self.ms = 0.0
         self.ticker = _Ticker(self, self._step)
@@ -2532,6 +2533,42 @@ class _Turnstile(_Moving):
             self.show()
             self.raise_()
         self.ticker.start()
+
+    def _times(self):
+        before, after, in_rows = self.before, self.after, self.in_rows
+        self.out_ms = _rows_ms(self.out_rows, ROW_OUT_MS) if before is not None else 0.0
+        self.in_start = self.out_ms + (GAP_MS if before is not None and after is not None else 0)
+        if after is None:
+            self.total = self.out_ms
+        elif self.entrance:
+            last = max((b[2] for b in in_rows), default=0)
+            self.total = self.in_start + max(last * ENTER_STAGGER_MS + ENTER_ROW_MS, ENTER_TITLE_MS)
+        else:
+            self.total = self.in_start + _rows_ms(in_rows, ROW_IN_MS)
+
+    def hold(self):
+        """Keep the page that is leaving on the screen, still, until go(): the
+        next page is put in place and pictured meanwhile, and whatever of it
+        reaches the screen early (a native surface makes Qt show the window
+        at once) stays behind this picture."""
+        self.held = True
+        self.start = _now() + 3600_000.0
+        if self.layer is not None and self.layer.initialized:
+            # on the screen now, not at the next turn of the event loop (the
+            # next page is placed before that): the layer draws its frame, and
+            # the window commits, which a subsurface needs to appear
+            QApplication.sendEvent(self.layer.surface, QEvent(QEvent.UpdateRequest))
+            self.layer.host.repaint(0, 0, 1, 1)
+
+    def go(self, after: Optional[Union[QPixmap, QImage]], in_rows: list):
+        """The next page is ready: the turn starts now."""
+        self.after, self.in_rows = after, in_rows
+        if self.layer is not None and after is not None:
+            img = after.toImage() if hasattr(after, "toImage") else after
+            self.layer.upload((id(self), "after"), img)
+        self._times()
+        self.held = False
+        self.start = _now()
 
     def hurry(self):
         """A finger does not wait for the first page to finish gliding in."""
@@ -2566,6 +2603,10 @@ class _Turnstile(_Moving):
     def _plan(self) -> list:
         """Each row's state this frame: (which page, y0, y1, degrees, alpha, travel)."""
         plan = []
+        if self.held:
+            # (the leaving page, still, while the next one is put in place)
+            h = float(self.height() if self.height() > 1 else self.parent().height())
+            return [("before", 0.0, h, 0.0, 1.0, 0.0)] if self.before is not None else plan
         if self.ms < 0:
             return plan             # an entrance set to start a moment from now: black until then
         if self.before is not None and self.ms < self.out_ms:
@@ -2606,6 +2647,12 @@ class _Turnstile(_Moving):
         h = float(self.height()) if self.height() > 1 else float(self.parent().height())
         # a page turn fills the window: black behind the rows, as it always showed
         out = [Quad.rect(("sys", "black"), _WHOLE, 0.0, 0.0, w, h)]
+        if self.held:
+            # the leaving page exactly where it was (not through turn()'s
+            # perspective, which even at no angle is not quite the window)
+            if self.before is not None:
+                out.append(Quad.rect((id(self), "before"), _WHOLE, 0.0, 0.0, w, h))
+            return out
         for which, y0, y1, degrees, alpha, travel in self._plan():
             from ._native import turn, entrance
             depth = 0.0
@@ -2809,9 +2856,12 @@ class App:
             return
         before = self._snap()
         out_rows = _row_bands(old, self.window, self.last_press_y)
+        self._turnstile(before, out_rows, None, [], back=False)
+        turn = self._turn
+        turn.hold()
         self.stack.append(page)
         self._place(page)
-        self._turnstile(before, out_rows, self._snap(), _row_bands(page, self.window), back=False)
+        turn.go(self._snap(), _row_bands(page, self.window))
         self._arrived(page)
 
     def pop(self) -> bool:
@@ -2821,11 +2871,14 @@ class App:
         before = self._snap()
         gone = self.stack.pop()
         out_rows = _row_bands(gone, self.window, reverse=True)
+        self._turnstile(before, out_rows, None, [], back=True)
+        turn = self._turn
+        turn.hold()
         page = self.stack[-1]
         self._place(page)
         self._layout.removeWidget(gone)
         gone.hide()
-        self._turnstile(before, out_rows, self._snap(), _row_bands(page, self.window, reverse=True), back=True)
+        turn.go(self._snap(), _row_bands(page, self.window, reverse=True))
         self._arrived(page)
         return True
 
