@@ -1,6 +1,6 @@
 #!/bin/sh
-# zrn-zram start|stop: compressed swap in RAM, half the RAM's size (see
-# zrn-zram.service)
+# zrn-zram start|stop: compressed swap in RAM, as large as the RAM itself
+# (see zrn-zram.service)
 set -e
 dev=/sys/block/zram0
 case "$1" in
@@ -9,8 +9,15 @@ start)
 	if grep -q '^/dev/zram0 ' /proc/swaps; then exit 0; fi
 	kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
 	echo 1 > $dev/reset
-	echo lzo-rle > $dev/comp_algorithm
-	echo "$((kb / 2))K" > $dev/disksize
+	# zstd packs app memory to about a quarter, lzo-rle to about a third:
+	# full, the zram takes ~0.7 GB of RAM for 2.6 GB of pages. A kernel
+	# without it (before ztOS's boot image #45) keeps lzo-rle.
+	if grep -qw zstd $dev/comp_algorithm; then
+		echo zstd > $dev/comp_algorithm
+	else
+		echo lzo-rle > $dev/comp_algorithm
+	fi
+	echo "${kb}K" > $dev/disksize
 	mkswap -q /dev/zram0
 	swapon -p 100 /dev/zram0
 	;;

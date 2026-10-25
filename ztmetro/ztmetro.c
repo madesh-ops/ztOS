@@ -6044,6 +6044,12 @@ static void child_priority(void) {
 	} attr = { .size = sizeof(attr), .flags = 0x20 /* the least utilisation */ };
 	syscall(SYS_sched_setattr, 0, &attr, 0);
 	setpriority(PRIO_PROCESS, 0, 0);
+	/* nor the shell's protection from the OOM killer (see oom_rank) */
+	int fd = open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
+	if (fd >= 0) {
+		if (write(fd, "0", 1) < 0) {}
+		close(fd);
+	}
 }
 
 /* zrnperfd's tickle pauses apps that are not in front: tell it which one is. */
@@ -6057,6 +6063,48 @@ static void perf_focus(struct zt_toplevel *toplevel) {
 	}
 	snprintf(line, sizeof(line), "focus %d %s\n", toplevel ? toplevel_pid(toplevel) : 0, id);
 	perf_tell(line);
+}
+
+/* When memory runs out, the kernel (MGLRU's min_ttl) or earlyoom ends the
+ * process with the highest oom_score_adj: let that be the app longest out of
+ * sight, never the one in front. The app in front gets 0, the others 300,
+ * 450, ... 900 by how recently they were shown (the toplevel list is in that
+ * order). The shell itself runs at -800 (greetd's drop-in); what it starts is
+ * put back to 0 (child_priority). An app started by D-Bus inherits the user
+ * manager's floor (100 or 200) and cannot go below it: it gets that. */
+static void oom_rank(struct zt_server *server) {
+	pid_t done[32];
+	int n_done = 0, rank = 0;
+	struct zt_toplevel *t;
+	wl_list_for_each(t, &server->toplevels, link) {
+		pid_t pid = t->mapped ? toplevel_pid(t) : 0;
+		bool seen = pid <= 1 || pid == getpid();
+		for (int i = 0; i < n_done && !seen; i++) {
+			seen = done[i] == pid;
+		}
+		if (seen || n_done == (int)(sizeof(done) / sizeof(done[0]))) {
+			continue;	/* a second window of the same process ranks as its first */
+		}
+		done[n_done++] = pid;
+		int adj = 0;
+		if (t != server->shown) {
+			adj = 300 + 150 * rank++;
+			adj = adj > 900 ? 900 : adj;
+		}
+		char path[40], value[8];
+		snprintf(path, sizeof(path), "/proc/%d/oom_score_adj", (int)pid);
+		int fd = open(path, O_WRONLY | O_CLOEXEC);
+		if (fd < 0) {
+			continue;
+		}
+		for (int floor = 0; ; floor += 100) {
+			int len = snprintf(value, sizeof(value), "%d", adj > floor ? adj : floor);
+			if (write(fd, value, (size_t)len) == len || errno != EACCES || floor >= 200) {
+				break;
+			}
+		}
+		close(fd);
+	}
 }
 
 static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel) {
@@ -6073,6 +6121,7 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 	if (toplevel != previous) {
 		perf_focus(toplevel);
 	}
+	oom_rank(server);
 	if (!toplevel) {
         server->pending_command[0] = 0;
         server->pending_pid = 0;

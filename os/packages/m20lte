@@ -23,3 +23,6 @@ bluez-utils
 epiphany
 # Remote control (Settings > remote control): the screen for a VNC viewer
 wayvnc
+# Low memory: ends the app longest out of sight before RAM and zram both run
+# out (devices/m20lte/rootfs/overlay/etc/default/earlyoom)
+earlyoom

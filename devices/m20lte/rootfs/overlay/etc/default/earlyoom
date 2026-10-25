@@ -1,0 +1,6 @@
+# earlyoom on the Galaxy M20: the second line behind MGLRU's min_ttl. When RAM
+# and zram both run out (under 5 % available and under 10 % of swap free) it
+# ends the process the kernel would pick, which ztMETRO makes the app least
+# recently in front (oom_score_adj 300-900), before the kernel stalls.
+# Never the shell, the login, sound or the system's own services.
+EARLYOOM_ARGS="-m 5 -s 10 -r 0 --avoid ^(ztmetro|greetd|pipewire|pipewire-pulse|wireplumber|systemd|systemd-.*|dbus-broker.*|sshd|NetworkManager|wpa_supplicant|Xwayland)$"

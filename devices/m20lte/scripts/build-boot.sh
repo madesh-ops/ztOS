@@ -190,6 +190,17 @@ for sym in CPU_FREQ CPU_FREQ_STAT CPU_FREQ_GOV_SCHEDUTIL CPU_FREQ_GOV_PERFORMANC
 	CPU_FREQ_GOV_POWERSAVE CPU_FREQ_GOV_USERSPACE CPU_FREQ_DEFAULT_GOV_SCHEDUTIL; do
 	cfg --enable "$sym"
 done
+# Memory, for 2.6 GB with a good part of it pinned by the GPU (Panfrost's
+# buffers are never swapped). MGLRU: with min_ttl_ms set (tmpfiles.d/90-m20-memory.conf), the
+# kernel kills an app as soon as what was used in the last second can no
+# longer stay in RAM, instead of thrashing zram for minutes with the screen
+# frozen. PSI: memory pressure for earlyoom and anyone who asks. zstd: zram
+# holds about a third more than lzo-rle; lz4 for a faster second choice.
+for sym in LRU_GEN LRU_GEN_ENABLED PSI ZRAM_BACKEND_ZSTD ZRAM_BACKEND_LZ4 ZSTD_COMPRESS \
+	ZSTD_DECOMPRESS LZ4_COMPRESS LZ4_DECOMPRESS; do
+	cfg --enable "$sym"
+done
+cfg --disable PSI_DEFAULT_DISABLED
 if [ -n "$WDT" ]; then
 	cfg --enable WATCHDOG
 	cfg --enable WATCHDOG_SYSFS
