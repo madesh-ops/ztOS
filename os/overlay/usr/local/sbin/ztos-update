@@ -35,7 +35,9 @@ check)
 		status "failed check"
 		exit 1
 	fi
-	pacman -Qu > "$LIST.new" 2>> "$LOG"
+	# (a package pacman.conf holds back, like the kernel ztOS builds itself,
+	# is listed "[ignored]": it is never installed, so it is not waiting)
+	pacman -Qu 2>> "$LOG" | grep -v ' \[ignored\]$' > "$LIST.new"
 	mv "$LIST.new" "$LIST"
 	n=$(grep -c . "$LIST")
 	if [ "$n" -gt 0 ]; then
@@ -60,7 +62,7 @@ apply)
 			;;
 		esac
 	done
-	if [ "$(pacman -Qu 2>/dev/null | grep -c .)" -eq 0 ]; then
+	if [ "$(pacman -Qu 2>/dev/null | grep -v ' \[ignored\]$' | grep -c .)" -eq 0 ]; then
 		n=$(grep -c . "$LIST" 2>/dev/null || echo 0)
 		: > "$LIST"
 		status "done $n"

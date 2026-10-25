@@ -104,7 +104,7 @@ def build_apps(stage: Path):
     out.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(SDK))
     from ztos_sdk import cli as sdk
-    projects = (OS / "apps" / "welcome", OS / "apps" / "whatsapp", ROOT / "apps" / "music",
+    projects = (OS / "apps" / "welcome", OS / "apps" / "updates", OS / "apps" / "whatsapp", ROOT / "apps" / "music",
                 ROOT / "apps" / "tube")
     for project in projects:
         native = project / "native" / "build.sh"
