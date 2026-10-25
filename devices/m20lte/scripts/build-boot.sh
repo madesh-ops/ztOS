@@ -223,7 +223,10 @@ else
 fi
 cfg --set-str EXTRA_FIRMWARE ""
 cfg --set-str INITRAMFS_SOURCE "$LIST"
-cfg --set-val CMA_SIZE_MBYTES 64
+# CMA: the video codec's frames (a 1080p decode takes ~60 MB, its firmware
+# and contexts 8 MB more) besides the display's. Unused, it holds movable
+# pages like the rest of RAM, so it costs nothing until a video plays.
+cfg --set-val CMA_SIZE_MBYTES 256
 cfg --set-str LOCALVERSION "-zboot"
 # clk_ignore_unused / pd_ignore_unused: the display, its DSI link and the
 # panel's power are the bootloader's and have no mainline driver; gating the

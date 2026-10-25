@@ -962,3 +962,7 @@ apply_patch("exynos-iommu-abox.patch", "drivers/iommu/exynos-iommu.c",
 apply_patch("s5p-mfc-vp9-hevc-first-frame.patch",
             "drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c",
             "S5P_MFC_CODEC_VP9_DEC) &&")
+# ... and gave mpv only five decoded frames of slack, which a page turn used up.
+apply_patch("s5p-mfc-extra-dpb.patch",
+            "drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h",
+            "MFC_MAX_EXTRA_DPB       16")

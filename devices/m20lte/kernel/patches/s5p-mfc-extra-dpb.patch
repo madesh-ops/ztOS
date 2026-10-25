@@ -1,0 +1,22 @@
+s5p-mfc: let the client hold more decoded frames than five.
+
+A decoder's capture queue was capped at the DPB the firmware asks for plus
+five. FFmpeg's V4L2 decoder (mpv, through it) holds several decoded frames of
+its own: while the display is not taking frames for a moment (an app's page
+turning), those five ran out, the firmware had nowhere to decode into and
+stopped taking stream buffers, and FFmpeg waited for a free one in poll()
+with no timeout, so mpv's core, and every app call into mpv, hung for good.
+Allow sixteen. The buffers come from CMA (256 MB on the Galaxy M20).
+
+45:#define MFC_MAX_EXTRA_DPB       16
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h
+@@ -42,7 +42,7 @@
+ #include <media/videobuf2-dma-contig.h>
+ 
+ /* MFC definitions */
+-#define MFC_MAX_EXTRA_DPB       5
++#define MFC_MAX_EXTRA_DPB       16
+ #define MFC_MAX_BUFFERS		32
+ #define MFC_NUM_CONTEXTS	4
+ /* Interrupt timeout */
