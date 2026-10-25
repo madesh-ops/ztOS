@@ -140,6 +140,14 @@ def reap(*_):
 
 
 def main():
+    # The shell keeps itself out of the OOM killer's reach (-800 on ztOS for
+    # the M20) and whoever started us may have passed that on: apps forked
+    # from here start at 0, and ztMETRO ranks them from there.
+    try:
+        with open("/proc/self/oom_score_adj", "w") as f:
+            f.write("0")
+    except OSError:
+        pass
     where = path()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
