@@ -201,6 +201,19 @@ for sym in LRU_GEN LRU_GEN_ENABLED PSI ZRAM_BACKEND_ZSTD ZRAM_BACKEND_LZ4 ZSTD_C
 	cfg --enable "$sym"
 done
 cfg --disable PSI_DEFAULT_DISABLED
+# The MFC, Samsung's video codec (v11.20 here), with mainline's s5p-mfc as a
+# module: only V4L2's platform side, none of the cameras, tuners or USB
+# devices MEDIA_SUPPORT would bring. Its firmware is the VENDOR partition's
+# (ztos-m20-firmware.service); patches/s5p-mfc-vp9-hevc-first-frame.patch.
+for sym in MEDIA_SUPPORT MEDIA_SUPPORT_FILTER MEDIA_PLATFORM_SUPPORT VIDEO_DEV \
+	V4L_PLATFORM_DRIVERS V4L_MEM2MEM_DRIVERS; do
+	cfg --enable "$sym"
+done
+for sym in MEDIA_CAMERA_SUPPORT MEDIA_ANALOG_TV_SUPPORT MEDIA_DIGITAL_TV_SUPPORT \
+	MEDIA_RADIO_SUPPORT MEDIA_SDR_SUPPORT MEDIA_TEST_SUPPORT MEDIA_USB_SUPPORT; do
+	cfg --disable "$sym"
+done
+cfg --module VIDEO_SAMSUNG_S5P_MFC
 if [ -n "$WDT" ]; then
 	cfg --enable WATCHDOG
 	cfg --enable WATCHDOG_SYSFS

@@ -624,6 +624,20 @@
 	};
 
 	/*
+	 * Video: the MFC, Samsung's codec (v11.20 in the M20 kernel's tree,
+	 * mfc0@12C30000), run by mainline's s5p-mfc as its v10: v11 keeps
+	 * v10's registers and host interface. The MFCMSCL power domain and its
+	 * clocks are on from the bootloader and left so (pd_ignore_unused,
+	 * clk_ignore_unused; no CMU_MFCMSCL driver yet). Its System MMU is not
+	 * used: the firmware and buffers come from CMA.
+	 */
+	mfc: codec@12c30000 {
+		compatible = "samsung,mfc-v10";
+		reg = <0x12c30000 0x10000>;
+		interrupts = <GIC_SPI 197 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	/*
 	 * Sound: ABOX, the audio DSP block (a Cortex-A7 running Samsung's
 	 * "calliope" firmware), its System MMU, and the DISPAUD clocks and
 	 * power domain it shares with the display. Nodes as in the Galaxy Tab A

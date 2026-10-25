@@ -955,3 +955,10 @@ apply_patch("exynos-pd-dispaud.patch", "drivers/pmdomain/samsung/exynos-pm-domai
             "exynos7885_dispaud_cfg")
 apply_patch("exynos-iommu-abox.patch", "drivers/iommu/exynos-iommu.c",
             "REG_V7_PT_BASE1")
+
+# --- video -----------------------------------------------------------------------
+# The MFC (Samsung's codec, v11.20 here) runs on mainline's s5p-mfc as its v10;
+# VP9 and HEVC lost their first frame to the stream header (see the patch).
+apply_patch("s5p-mfc-vp9-hevc-first-frame.patch",
+            "drivers/media/platform/samsung/s5p-mfc/s5p_mfc.c",
+            "S5P_MFC_CODEC_VP9_DEC) &&")

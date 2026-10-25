@@ -1,0 +1,13 @@
+[Unit]
+Description=ztOS: the M20's firmware from its VENDOR partition
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ztos-m20-firmware
+
+[Install]
+WantedBy=sysinit.target

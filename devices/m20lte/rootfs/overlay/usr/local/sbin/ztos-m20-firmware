@@ -1,0 +1,29 @@
+#!/bin/sh
+# ztos-m20-firmware: the Galaxy M20's own firmware, from its VENDOR partition
+# (Samsung's, not redistributable, so never in ztOS's image), copied in where
+# the kernel looks first (/usr/lib/firmware/updates: no package puts anything
+# there, so no update can clash with it). Runs at every boot; copies only what
+# is missing. Read-only on VENDOR.
+#   mfc_fw.bin -> s5p-mfc-v10.fw   the video codec (s5p-mfc runs the MFC v11.20
+#                                  as its v10)
+set -eu
+DEST=/usr/lib/firmware/updates
+want() { [ ! -s "$DEST/$2" ]; }
+want mfc_fw.bin s5p-mfc-v10.fw || exit 0
+
+dev=
+for u in /sys/class/block/*/uevent; do
+	grep -qx PARTNAME=VENDOR "$u" && dev=/dev/$(sed -n 's/^DEVNAME=//p' "$u")
+done
+[ -n "$dev" ] || { echo "no VENDOR partition" >&2; exit 1; }
+mnt=$(mktemp -d)
+trap 'umount "$mnt" 2>/dev/null; rmdir "$mnt"' EXIT
+mount -o ro "$dev" "$mnt"
+mkdir -p "$DEST"
+copy() {
+	if want "$1" "$2" && [ -s "$mnt/firmware/$1" ]; then
+		install -m644 "$mnt/firmware/$1" "$DEST/$2.new" && mv "$DEST/$2.new" "$DEST/$2"
+		echo "$1 -> $DEST/$2"
+	fi
+}
+copy mfc_fw.bin s5p-mfc-v10.fw
