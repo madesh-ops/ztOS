@@ -1,0 +1,18 @@
+[Unit]
+Description=ztOS: the M20's libgallium, patched for the Mali-G71's derivatives
+# started by pacman's hook after a mesa update, and at boot: nothing to do
+# when the library in place is already the patched one
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/ztos/mesa/build-mesa.sh auto
+# a half-hour compile, behind whatever the phone is doing
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=20
+TimeoutStartSec=4h
+
+[Install]
+WantedBy=multi-user.target

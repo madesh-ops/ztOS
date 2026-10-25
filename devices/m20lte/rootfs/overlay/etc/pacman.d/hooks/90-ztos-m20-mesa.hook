@@ -1,0 +1,13 @@
+# A mesa update replaces the M20's patched libgallium with Arch's, which draws
+# derivatives wrong on the Mali-G71: rebuild the patched one for the new
+# version, in the background (devices/m20lte/mesa/build-mesa.sh).
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = mesa
+
+[Action]
+Description = Rebuilding the M20's graphics fix for the new Mesa (in the background)...
+When = PostTransaction
+Exec = /usr/bin/systemctl start --no-block ztos-m20-mesa.service

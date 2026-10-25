@@ -244,6 +244,10 @@ if [ "$TARGET" = m20lte ]; then
 	# phone it is ztos-m20-dsi (touch | init | cmd).
 	install -Dm755 "$SRC/devices/m20lte/scripts/dsi.py" "$R/usr/local/sbin/ztos-m20-dsi"
 	install -Dm644 "$SRC/devices/m20lte/scripts/m20_init_seq.py" "$R/usr/local/lib/ztos/m20_init_seq.py"
+	# the Mali-G71 derivative fix, built on the phone for its mesa (at first
+	# boot, and again after each mesa update: ztos-m20-mesa.service)
+	install -Dm755 "$SRC/devices/m20lte/mesa/build-mesa.sh" "$R/usr/local/lib/ztos/mesa/build-mesa.sh"
+	install -Dm644 "$SRC/devices/m20lte/mesa/pan-bi-g71-derivatives.diff" "$R/usr/local/lib/ztos/mesa/pan-bi-g71-derivatives.diff"
 	if [ -d "$SRC/build/wallpapers/backgrounds/ztos" ]; then
 		install -d "$R/usr/local/share/backgrounds"
 		cp -a "$SRC/build/wallpapers/backgrounds/ztos" "$R/usr/local/share/backgrounds/"
@@ -328,7 +332,7 @@ fi
 if [ "$TARGET" = m20lte ]; then
 	# systemd-networkd runs the USB link's DHCP server (10-zboot-usb.network;
 	# NetworkManager leaves usb0 alone), so the computer gets 172.16.42.2
-	for u in zboot-usb-gadget zboot-firstboot zboot-hold systemd-networkd zrn-zram earlyoom; do
+	for u in zboot-usb-gadget zboot-firstboot zboot-hold systemd-networkd zrn-zram earlyoom ztos-m20-mesa; do
 		ch systemctl enable "$u" > /dev/null 2>&1 || echo "(no $u)"
 	done
 	# RAM: no screen reader and no Flatpak here, yet the first GTK app starts
