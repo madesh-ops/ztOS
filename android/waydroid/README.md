@@ -98,8 +98,17 @@ entire original binary SHA256 before changing three AArch64 call instructions:
   restart; this deployment does not support dynamic resizing. Replace this workaround
   with a vendor rebuilt from those upstream fixes before adding dynamic resizing.
 
+A third defect hid every video in apps that draw it on a SurfaceControl of their
+own (Instagram, Discord): in multi-window mode the composer puts a layer in an
+app's window only when its name carries the task (`TID:70#...`), and such a
+layer is named by the app (`bbq-wrapper#105`), so it was dropped and the screen
+showed black where Android played the video. `patch-composer.py` now gives a
+plain-named `bbq-` layer the window of the task layer just above it (code in
+the page after `.plt`, the executable segment extended over it; the script's
+docstring has the instructions).
+
 The script refuses an unknown binary or nonmatching geometry. The patched composer
-SHA256 is `b9ab46a88b840da337aa6bbd37f309ae73463fd0d590f21636998f7530cd41ff`.
+SHA256 is `1315a2b4e17997d4d9421ea522c37b8cda6ed850d60d689b7e9583e7d7110d9f`.
 Applying the patch twice is safe; rejection of an unknown binary was tested.
 
 ## Networking
