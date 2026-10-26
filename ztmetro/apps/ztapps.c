@@ -915,7 +915,20 @@ static bool scan(bool print) {
 				app->key[n++] = isalnum((unsigned char)*c) || *c == '-' || *c == '_' || *c == '.' ? *c : '_';
 			}
 			app->key[n] = 0;
-			if (!colour_ensure(app->icon, app->key) && !glyph_ensure(app->icon, app->key, sizeof(app->key))) {
+			/* Waydroid's own copy of the icon (189 px) when it is the larger:
+			 * ztos-android's may be the APK's 48 px one */
+			char waydroid_icon[512], package[160] = "";
+			const char *source = app->icon;
+			const char *home = getenv("HOME");
+			int w = 0, h = 0, ww = 0, wh = 0;
+			if (sscanf(app->command, "ztos-android launch %159s", package) == 1 && home) {
+				snprintf(waydroid_icon, sizeof(waydroid_icon), "%s/.local/share/waydroid/data/icons/%s.png", home, package);
+				if (gdk_pixbuf_get_file_info(waydroid_icon, &ww, &wh) &&
+						(!gdk_pixbuf_get_file_info(app->icon, &w, &h) || ww * wh > w * h)) {
+					source = waydroid_icon;
+				}
+			}
+			if (!colour_ensure(source, app->key) && !glyph_ensure(app->icon, app->key, sizeof(app->key))) {
 				snprintf(app->key, sizeof(app->key), "-");
 			}
 		}

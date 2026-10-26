@@ -123,6 +123,7 @@ enum action {
 	ACT_TIMEOUT_CYCLE,
 	ACT_SCALE_CYCLE,
 	ACT_NAV_SIZE_CYCLE,
+	ACT_ANDROID_ICONS,	/* the picker: how Android apps' icons look */
 	ACT_NAV_ICON,
 	ACT_KEY_HEIGHT,
 	ACT_KEY_SOUND,
@@ -224,6 +225,7 @@ static struct {
 	int timeout_idx;
 	int nav_size_idx;
 	int nav_icon_idx;
+	int android_icons;	/* ANDROID_ICON_NAMES: themed, circle, box */
 	int scale_idx;
 
 	bool wifi_on, wifi_loading;
@@ -275,6 +277,7 @@ static struct {
 	.autobrightness = true,
 	.timeout_idx = 1,
 	.nav_size_idx = 0,
+	.android_icons = 1,	/* the shell's default: in a circle */
 	.scale_idx = 1,
 	.mobile_data = true,
 	.roaming = false,
@@ -420,6 +423,8 @@ static void config_load(void) {
 			snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", val);
 		} else if (strcmp(key, "nav_center_icon") == 0) {
 			int n = atoi(val); app.nav_icon_idx = n < 0 ? 0 : n > 4 ? 4 : n;
+		} else if (strcmp(key, "android_icons") == 0) {
+			app.android_icons = strcmp(val, "themed") == 0 ? 0 : strcmp(val, "box") == 0 ? 2 : 1;
 		} else if (strcmp(key, "accent") == 0) {
 			for (int i = 0; i < N_ACCENTS; i++) {
 				if (strcmp(ACCENTS[i].name, val) == 0) {
@@ -610,7 +615,7 @@ static void auto_load(void) {
 
 static void config_save(void) {
 	static const int timeouts[] = { 30, 60, 180, 300, 0 };
-	enum { N_KEYS = 20 + N_HAPTIC_GROUPS };
+	enum { N_KEYS = 21 + N_HAPTIC_GROUPS };
 	struct { const char *key; char value[300]; bool written; } keys[N_KEYS] = {
 		{ .key = "accent" }, { .key = "columns" }, { .key = "haptics" },
 		{ .key = "brightness" }, { .key = "timeout" }, { .key = "demo_tiles" },
@@ -640,6 +645,9 @@ static void config_save(void) {
 	snprintf(keys[18 + N_HAPTIC_GROUPS].value, sizeof(keys[0].value), "%s", app.lock_wall);
 	keys[19 + N_HAPTIC_GROUPS].key = "nav_center_icon";
 	snprintf(keys[19 + N_HAPTIC_GROUPS].value, 32, "%d", app.nav_icon_idx);
+	static const char *const android_icon_keys[] = { "themed", "circle", "box" };
+	keys[20 + N_HAPTIC_GROUPS].key = "android_icons";
+	snprintf(keys[20 + N_HAPTIC_GROUPS].value, 32, "%s", android_icon_keys[app.android_icons]);
 	snprintf(keys[0].value, 32, "%s", ACCENTS[app.accent].name);
 	snprintf(keys[1].value, 32, "%d", app.columns);
 	snprintf(keys[2].value, 32, "%s", app.haptics ? "on" : "off");
@@ -1803,7 +1811,10 @@ static double draw_theme(cairo_t *cr) {
 		zmc_text(cr, label, FONT_REGULAR, 13, bx + 10, y + 9, 0);
 		zmc_add_hit(bx, y, btn_w, 36, ACT_COLUMNS, c);
 	}
-	return draw_wall_row(cr, y + 60);	/* under the columns row (36 high, 24 below) */
+	/* Android apps' own icons (the shell's "android_icons") */
+	static const char *const android_icons[] = { "themed", "circled", "full box" };
+	y = picker(cr, y + 60, "Android app icons", android_icons, 3, app.android_icons, ACT_ANDROID_ICONS);
+	return draw_wall_row(cr, y);
 }
 
 /* The brightness as it is now, in percent (the shell or sensord may have
@@ -3058,7 +3069,7 @@ static double render_page_content(cairo_t *cr, int p) {
 
 static bool is_picker(int action) {
 	switch (action) {
-	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE: case ACT_NAV_SIZE_CYCLE:
+	case ACT_TIMEOUT_CYCLE: case ACT_SCALE_CYCLE: case ACT_NAV_SIZE_CYCLE: case ACT_ANDROID_ICONS:
 	case ACT_NETWORK_MODE: case ACT_COMP_ALGO_CYCLE: case ACT_PERF_PROFILE: case ACT_IB_MODE: case ACT_IB_ENGINE:
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
@@ -3513,6 +3524,10 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_NAV_SIZE_CYCLE:
 		app.nav_size_idx = arg;
+		break;
+	case ACT_ANDROID_ICONS:
+		app.android_icons = arg < 0 ? 0 : arg > 2 ? 2 : arg;
+		config_save();
 		break;
 	case ACT_MOBILE_DATA:
 		/* ztoscorenetworkingd's: the same thing the action centre's tile asks */

@@ -304,6 +304,11 @@ struct app_item {
 	float tilt_x, tilt_y, press;
 };
 
+/* How an Android app's own icon (KEY.color.png) is shown: as the white
+ * glyph every other app has, in its colours in a circle, or covering the
+ * tile or row square (settings > theme, "android_icons"). */
+enum { ANDROID_ICONS_THEMED, ANDROID_ICONS_CIRCLE, ANDROID_ICONS_BOX };
+
 struct glyph {
 	char key[72];
 	cairo_surface_t *surface;	/* A8, or ARGB32 for an icon kept in its own
@@ -481,6 +486,7 @@ struct zt_server {
 	uint32_t accent;
 	bool haptics_enabled;
 	int nav_center_icon;
+	int android_icons;	/* Android apps' icons: ANDROID_ICONS_THEMED, _CIRCLE or _BOX */
 	int units;		/* Start: small tiles per row; twice the medium columns */
 
 	/* renderer */
@@ -2748,6 +2754,7 @@ static void load_config(struct zt_server *server) {
 		server->haptic_level[i] = 100;
 	}
 	server->scale = 4.0f;
+	server->android_icons = ANDROID_ICONS_CIRCLE;
 	server->units = 6;		/* three medium tiles across */
 	server->menu_speed = 75;
 	server->key_height = DEFAULT_KEY_HEIGHT;
@@ -2778,6 +2785,9 @@ static void load_config(struct zt_server *server) {
 		} else if (strcmp(key, "nav_center_icon") == 0) {
 			int n = atoi(value);
 			server->nav_center_icon = n < 0 ? 0 : n > 4 ? 4 : n;
+		} else if (strcmp(key, "android_icons") == 0) {
+			server->android_icons = strcmp(value, "themed") == 0 ? ANDROID_ICONS_THEMED :
+				strcmp(value, "box") == 0 ? ANDROID_ICONS_BOX : ANDROID_ICONS_CIRCLE;
 		} else if (strcmp(key, "accent") == 0) {
 			server->accent = parse_color(server, value);
 		} else if (strcmp(key, "key_height") == 0) {
@@ -3114,7 +3124,7 @@ static cairo_surface_t *glyph_get(struct zt_server *server, const char *key) {
 	 * file's extension; a tile may have been pinned by the bare name */
 	static const char *const ext[] = { "", ".svg", ".png" };
 	/* an Android app's icon in its own colours (ztapps: KEY.color.png) */
-	for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++) {
+	for (size_t i = 0; server->android_icons != ANDROID_ICONS_THEMED && i < sizeof(ext) / sizeof(ext[0]); i++) {
 		snprintf(below, sizeof(below), "icons/%s%s.color.png", key, ext[i]);
 		cache_path(path, sizeof(path), below);
 		if (access(path, R_OK) != 0) {
@@ -3198,6 +3208,54 @@ static const char *app_symbol_name(const char *label) {
 	return NULL;
 }
 
+/* An Android app's icon covering the box (bx, by, bw, bh): the box in the
+ * colour just inside the icon's top edge (its background, for an adaptive
+ * icon), then the icon so large that its circle's inscribed square spans the
+ * box's shorter side, its outer ring cut away. */
+static void draw_icon_box(cairo_t *cr, cairo_surface_t *icon, double bx, double by, double bw, double bh) {
+	const uint32_t *px = (const uint32_t *)cairo_image_surface_get_data(icon);
+	int stride = cairo_image_surface_get_stride(icon) / 4, edge = 0;
+	while (edge < GLYPH_PX / 2 && (px[edge * stride + GLYPH_PX / 2] >> 24) < 250) {
+		edge++;
+	}
+	uint32_t p = px[(edge + GLYPH_PX / 32) * stride + GLYPH_PX / 2];
+	double a = (p >> 24) / 255.0;
+	if (a > 0) {
+		cairo_set_source_rgb(cr, ((p >> 16) & 255) / 255.0 / a, ((p >> 8) & 255) / 255.0 / a, (p & 255) / 255.0 / a);
+	}
+	cairo_save(cr);
+	cairo_rectangle(cr, bx, by, bw, bh);
+	cairo_clip(cr);
+	if (a > 0) {
+		cairo_paint(cr);
+	}
+	double side = (GLYPH_PX - 2.0 * edge) / sqrt(2), s = fmin(bw, bh) / side;
+	cairo_translate(cr, bx + bw / 2, by + bh / 2);
+	cairo_scale(cr, s, s);
+	cairo_set_source_surface(cr, icon, -GLYPH_PX / 2.0, -GLYPH_PX / 2.0);
+	cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+	cairo_paint(cr);
+	cairo_restore(cr);
+}
+
+static void draw_glyph(struct zt_server *server, cairo_t *cr, const char *icon,
+		const char *label, double cx, double cy, double s);
+
+/* draw_glyph in a tile or a row's square (bx, by, bw, bh), which an Android
+ * app's icon covers when that is the choice; true when it did. */
+static bool draw_glyph_box(struct zt_server *server, cairo_t *cr, const char *icon,
+		const char *label, double bx, double by, double bw, double bh) {
+	if (server->android_icons == ANDROID_ICONS_BOX && icon[0] == '@') {
+		cairo_surface_t *glyph = glyph_get(server, icon + 1);
+		if (glyph && cairo_image_surface_get_format(glyph) == CAIRO_FORMAT_ARGB32) {
+			draw_icon_box(cr, glyph, bx, by, bw, bh);
+			cairo_set_source_rgb(cr, 1, 1, 1);
+			return true;
+		}
+	}
+	return false;
+}
+
 static void draw_glyph(struct zt_server *server, cairo_t *cr, const char *icon,
 		const char *label, double cx, double cy, double s) {
 	const char *sym = label ? app_symbol_name(label) : NULL;
@@ -3214,7 +3272,9 @@ static void draw_glyph(struct zt_server *server, cairo_t *cr, const char *icon,
 		cairo_translate(cr, cx - s / 2, cy - s / 2);
 		cairo_scale(cr, s / GLYPH_PX, s / GLYPH_PX);
 		if (cairo_image_surface_get_format(glyph) == CAIRO_FORMAT_ARGB32) {
-			/* the app's own icon, as it is: not in the theme's colour */
+			/* the app's own icon, as it is: not in the theme's colour, in a circle */
+			cairo_arc(cr, GLYPH_PX / 2.0, GLYPH_PX / 2.0, GLYPH_PX / 2.0, 0, 2 * M_PI);
+			cairo_clip(cr);
 			cairo_set_source_surface(cr, glyph, 0, 0);
 			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
 			cairo_paint(cr);
@@ -3353,11 +3413,12 @@ static void draw_tile(struct zt_server *server, int i) {
 	cairo_set_source_rgb(cr, 1, 1, 1);
 	/* a glyph made from an icon fills its box to the edge: a little smaller */
 	double k = t->icon[0] == '@' ? 0.86 : 1.0;
+	bool boxed = draw_glyph_box(server, cr, t->icon, t->label, 0, 0, t->w, t->h);
 	if (t->size == TILE_SMALL) {
-		draw_glyph(server, cr, t->icon, t->label, t->w / 2, t->h / 2, t->h * 0.56 * k);
+		if (!boxed) draw_glyph(server, cr, t->icon, t->label, t->w / 2, t->h / 2, t->h * 0.56 * k);
 	} else {
 		/* icon slightly above centre, label at the bottom left */
-		draw_glyph(server, cr, t->icon, t->label, t->w / 2, t->h * 0.44, t->h * 0.46 * k);
+		if (!boxed) draw_glyph(server, cr, t->icon, t->label, t->w / 2, t->h * 0.44, t->h * 0.46 * k);
 		draw_text(cr, t->label, FONT_REGULAR, 13, 8, t->h - 23, t->w - 16, 0, false);
 	}
 	if (t->live && t->live_count > 0) {
@@ -3833,7 +3894,9 @@ static void draw_item(struct zt_server *server, int i) {
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		char icon[80];
 		snprintf(icon, sizeof(icon), "@%s", it->key);
-		draw_glyph(server, cr, icon, it->name, LIST_ICON / 2.0, LIST_ICON / 2.0, 25);
+		if (!draw_glyph_box(server, cr, icon, it->name, 0, 0, LIST_ICON, LIST_ICON)) {
+			draw_glyph(server, cr, icon, it->name, LIST_ICON / 2.0, LIST_ICON / 2.0, 25);
+		}
 		draw_text(cr, it->name, FONT_SEMILIGHT, 22, LIST_ICON + 13, 7, w - LIST_ICON - 13, 0, false);
 	}
 	zt_buffer_show(server, &it->layer, buffer, cr, w, LIST_ICON);
@@ -12219,11 +12282,15 @@ static int reload(int signal_number, void *data) {
 	float scale = server->scale;
 	int n = server->n_tiles;
 	uint32_t accent = server->accent;
+	int android_icons = server->android_icons;
 	int strength = server->haptic_strength;
 	int ring_before = server->ring_volume;
 	load_config(server);
 	if (ring_before > 0 && server->ring_volume == 0) hap(server, HAP_TAP, HG_SYSTEM);
 	server->scale = scale;
+	if (android_icons != server->android_icons) {
+		glyphs_forget(server);	/* an Android app's glyph is its icon or not */
+	}
 	if (strength != server->haptic_strength) {
 		hap(server, HAP_CLICK, HG_SYSTEM);	/* this is how it feels now */
 	}
@@ -12264,8 +12331,8 @@ static int reload(int signal_number, void *data) {
 		place_tiles(server);
 		draw_start(server);
 		set_scroll(server, server->scroll);
-		if (accent != server->accent) {
-			load_apps(server);	/* the list's squares are the accent colour */
+		if (accent != server->accent || android_icons != server->android_icons) {
+			load_apps(server);	/* the list's squares: the accent colour, the icons */
 		}
 		draw_status(server);
 		draw_shade(server);
@@ -12391,7 +12458,9 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 		set_rgb(cr, t->color);
 		cairo_paint(cr);
 		cairo_set_source_rgb(cr, 1, 1, 1);
-		draw_glyph(server, cr, t->icon, t->label, t->w / 2, t->h * 0.44, t->h * 0.46);
+		if (!draw_glyph_box(server, cr, t->icon, t->label, 0, 0, t->w, t->h)) {
+			draw_glyph(server, cr, t->icon, t->label, t->w / 2, t->h * 0.44, t->h * 0.46);
+		}
 		zt_buffer_show(server, &t->layer, buffer, cr, t->w, t->h);
 	}
 	return 0;
