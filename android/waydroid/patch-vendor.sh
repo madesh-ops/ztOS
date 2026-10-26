@@ -30,6 +30,15 @@ e2fsck -fy "$work/vendor.img" >/dev/null || (( $? <= 1 ))
 resize2fs "$work/vendor.img" >/dev/null 2>&1
 mount -o loop,rw "$work/vendor.img" "$work/root"
 python3 "$here/patch-composer.py" "$work/root/lib64/hw/hwcomposer.waydroid.so"
+# This phone's own files over the image's (/vendor/ztos/android-vendor, laid
+# out as the vendor image is): the M20's Android Mesa with its G71 fix
+# (devices/m20lte/mesa/build-android-mesa.sh).
+if [[ -d /vendor/ztos/android-vendor ]]; then
+    cp -r --no-preserve=ownership /vendor/ztos/android-vendor/. "$work/root/"
+    (cd /vendor/ztos/android-vendor && find . -type f) | while read -r f; do
+        chown 0:0 "$work/root/$f"; chmod 644 "$work/root/$f"; echo "vendor: ${f#./}"
+    done
+fi
 # This phone's environment for Android's processes (its manifest's
 # [android.environment]): Android's Mesa reads its debug options only from the
 # environment, and init's export reaches zygote and every app it forks.

@@ -56,10 +56,9 @@ memory_budget_mb = 1200
 "ro.product.model_for_attestation" = "Samsung Galaxy M20 (SM-M205F)"
 
 # for every Android process (android/waydroid/patch-vendor.sh): AFBC off for
-# Android's own Mesa on this r0p0 G71, as for the host's (os/overlay-m20lte
-# session.env). Not enough for Subway Surfers: its fragment jobs still fault
-# (IMPRECISE_FAULT, INSTR_INVALID_ENC in dmesg) and leave old frames in the
-# tiles not reached; nocrc, linear and sync changed nothing.
+# Android's Mesa on this r0p0 G71, as for the host's (os/overlay-m20lte
+# session.env). Android's Mesa itself is replaced by ../mesa/build-android-mesa.sh
+# (the G71 fix; Waydroid's own faulted and left old frames on screen in games).
 [android.environment]
 PAN_MESA_DEBUG = "noafbc"
 
