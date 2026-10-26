@@ -6,6 +6,7 @@
  * Built on ZrnMetroCore; nothing here draws a window or handles a finger.
  */
 #define _GNU_SOURCE
+#include <ctype.h>
 #include <dirent.h>
 #include <math.h>
 #include <fcntl.h>
@@ -17,14 +18,15 @@
 #include <sys/sysinfo.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "ztos-hw.h"
 #include "zrnmetrocore.h"
 
 enum page { PAGE_HUB, PAGE_SYSTEM, PAGE_SENSORS, PAGE_JOURNAL, PAGE_KERNEL, PAGE_SHELL, PAGE_HARDWARE,
-	PAGE_LOGS /* the hub's second tab */, PAGE_ANIM, PAGE_PREVIEW };
-enum action { ACT_OPEN = 1, ACT_PLAY };
+	PAGE_LOGS /* the hub's second tab */, PAGE_ANIM, PAGE_PREVIEW, PAGE_TASKS };
+enum action { ACT_OPEN = 1, ACT_PLAY, ACT_TASK };
 
 #define MAX_LINES	70	/* of a log, newest first */
 #define LINE_LEN	240
@@ -129,6 +131,7 @@ static double draw_hub(cairo_t *cr) {
 	y = zmc_entry(cr, y, "system", "kernel, memory, storage, load", ACT_OPEN, PAGE_SYSTEM);
 	y = zmc_entry(cr, y, "sensors", "battery, charger, heat, clocks: live", ACT_OPEN, PAGE_SENSORS);
 	y = zmc_entry(cr, y, "hardware", "what this kernel drives, and what it does not", ACT_OPEN, PAGE_HARDWARE);
+	y = zmc_entry(cr, y, "task manager", "the apps that are running, and ending them", ACT_OPEN, PAGE_TASKS);
 	y = zmc_entry(cr, y, "animations", "Windows Phone 8.1's transitions, from the Lumia 530's firmware", ACT_OPEN, PAGE_ANIM);
 	return y + 20;
 }
@@ -582,6 +585,351 @@ static double draw_anims(cairo_t *cr) {
 	return y + 20;
 }
 
+/* ---- task manager --------------------------------------------------------
+ *
+ * The apps that are running, which can be ended: the Android apps the user
+ * installed (ztOS's list of them, ~/.local/share/ztos/android/applications.json),
+ * ended in Android (force-stop, through the Waydroid recovery helper, which
+ * sudo allows the user), and the user's own Linux and SDK apps (SIGTERM, then
+ * SIGKILL 3 s on). Nothing of the system can be: Android's own processes (the
+ * container's cgroup; Android's system user is uid 1000 too), other users',
+ * the user's session and background services (PipeWire, D-Bus), the portals, ztOS's own programs
+ * and apps (zt*, zrn*, the SDK apps under /usr), shells and ssh. Those are
+ * only counted. */
+
+#define MAX_TASKS	64
+#define MAX_PKGS	64
+
+struct task {
+	pid_t pid;		/* an Android app's: its main process */
+	char name[64];
+	char package[128];	/* an Android app's; empty for a Linux one */
+	long rss_kb;
+	double cpu;		/* percent of the whole phone */
+};
+
+static struct task tasks[MAX_TASKS];
+static int n_tasks, n_protected;
+static pid_t task_selected;		/* tapped once: the next tap ends it */
+static char task_note[96];		/* what was ended, for a moment */
+
+/* CPU time last seen, per pid, for the percentages */
+static struct { pid_t pid; unsigned long long ticks; } cpu_seen[1024], cpu_now[1024];
+static int n_seen, n_now;
+static double cpu_seen_at;
+
+static bool read_text(const char *path, char *out, size_t size) {
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return false;
+	ssize_t got = read(fd, out, size - 1);
+	close(fd);
+	if (got < 0) return false;
+	out[got] = 0;
+	return true;
+}
+
+/* A JSON string value after `key` within [from, to), into out */
+static bool json_string(const char *from, const char *to, const char *key, char *out, size_t size) {
+	char want[48];
+	snprintf(want, sizeof(want), "\"%s\":", key);
+	const char *p = strstr(from, want);
+	if (!p || p >= to) return false;
+	p = strchr(p + strlen(want), '"');
+	if (!p || p >= to) return false;
+	const char *end = strchr(p + 1, '"');
+	if (!end || end >= to) return false;
+	snprintf(out, size, "%.*s", (int)(end - p - 1), p + 1);
+	return true;
+}
+
+/* The user's Android apps: package and name, from ztOS's list of them (an
+ * object of objects, each with "package" and "name") */
+static int android_apps(char pkgs[][128], char names[][64]) {
+	static char buf[65536];
+	char path[512];
+	const char *home = getenv("HOME");
+	snprintf(path, sizeof(path), "%s/.local/share/ztos/android/applications.json", home ? home : "");
+	if (!read_text(path, buf, sizeof(buf))) return 0;
+	int n = 0, depth = 0;
+	const char *start = NULL;
+	bool in_string = false;
+	for (const char *p = buf; *p && n < MAX_PKGS; p++) {
+		if (in_string) {
+			if (*p == '\\' && p[1]) p++;
+			else if (*p == '"') in_string = false;
+			continue;
+		}
+		if (*p == '"') in_string = true;
+		else if (*p == '{' && ++depth == 2) start = p;
+		else if (*p == '}' && depth-- == 2 && start) {
+			if (json_string(start, p, "package", pkgs[n], 128)) {
+				if (!json_string(start, p, "name", names[n], 64)) {
+					snprintf(names[n], 64, "%s", pkgs[n]);
+				}
+				bool seen = false;
+				for (int i = 0; i < n; i++) seen = seen || strcmp(pkgs[i], pkgs[n]) == 0;
+				if (!seen) n++;
+			}
+			start = NULL;
+		}
+	}
+	return n;
+}
+
+static bool protected_name(const char *comm) {
+	static const char *const names[] = {
+		"systemd", "(sd-pam)", "sh", "bash", "dash", "zsh", "sudo", "su", "login",
+		"sshd", "sshd-session", "ssh-agent", "dbus-daemon", "dbus-broker", "dbus-broker-lau",
+		"pipewire", "pipewire-pulse", "wireplumber", "hypridle", "greetd", "agreety",
+		"gnome-keyring-d", "dconf-service", "Xwayland",
+	};
+	if (!strncmp(comm, "zt", 2) || !strncmp(comm, "zrn", 3) || !strncmp(comm, "xdg-", 4) ||
+			!strncmp(comm, "gvfs", 4) || !strncmp(comm, "at-spi", 6)) {
+		return true;	/* ztOS's own, the portals, GNOME's helpers */
+	}
+	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		if (!strcmp(comm, names[i])) return true;
+	}
+	return false;
+}
+
+/* /proc/PID/stat after "(comm) ": field n (state is 1) */
+static const char *stat_field(const char *p, int n) {
+	for (int field = 1; *p && field < n; p++) {
+		if (*p == ' ') field++;
+	}
+	return p;
+}
+
+/* CPU ticks since the last look, and remembered for the next */
+static unsigned long long cpu_since(pid_t pid, unsigned long long ticks) {
+	if (n_now < 1024) {
+		cpu_now[n_now].pid = pid;
+		cpu_now[n_now].ticks = ticks;
+		n_now++;
+	}
+	for (int i = 0; i < n_seen; i++) {
+		if (cpu_seen[i].pid == pid) return ticks >= cpu_seen[i].ticks ? ticks - cpu_seen[i].ticks : 0;
+	}
+	return 0;
+}
+
+static bool maps_wayland(pid_t pid) {
+	char path[64], line[512];
+	snprintf(path, sizeof(path), "/proc/%d/maps", pid);
+	FILE *f = fopen(path, "re");
+	bool found = false;
+	while (f && !found && fgets(line, sizeof(line), f)) {
+		found = strstr(line, "libwayland-client") != NULL;
+	}
+	if (f) fclose(f);
+	return found;
+}
+
+static void tasks_scan(void) {
+	static char pkgs[MAX_PKGS][128], names[MAX_PKGS][64];
+	int n_pkgs = android_apps(pkgs, names);
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	double now = ts.tv_sec + ts.tv_nsec / 1e9, span = cpu_seen_at > 0 ? now - cpu_seen_at : 0;
+	double scale = span > 0 ? 100.0 / (span * sysconf(_SC_CLK_TCK) * sysconf(_SC_NPROCESSORS_CONF)) : 0;
+	long page_kb = sysconf(_SC_PAGESIZE) / 1024;
+	n_now = 0;
+	n_tasks = n_protected = 0;
+	uid_t me = getuid();
+	pid_t self = getpid();
+	DIR *proc = opendir("/proc");
+	struct dirent *e;
+	while (proc && (e = readdir(proc))) {
+		if (!isdigit((unsigned char)e->d_name[0])) continue;
+		pid_t pid = atoi(e->d_name);
+		char path[64], stat[1024], cmd[512], cgroup[512] = "", status[2048];
+		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+		if (!read_text(path, stat, sizeof(stat))) continue;
+		char *open_paren = strchr(stat, '('), *close_paren = strrchr(stat, ')');
+		if (!open_paren || !close_paren || !close_paren[1]) continue;
+		char comm[32];
+		snprintf(comm, sizeof(comm), "%.*s", (int)(close_paren - open_paren - 1), open_paren + 1);
+		const char *fields = close_paren + 2;
+		unsigned long long utime = 0, stime = 0;
+		long rss_pages = 0;
+		sscanf(stat_field(fields, 12), "%llu %llu", &utime, &stime);
+		sscanf(stat_field(fields, 22), "%ld", &rss_pages);
+		unsigned long long ticks = cpu_since(pid, utime + stime);
+		snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		ssize_t cmd_len = fd >= 0 ? read(fd, cmd, sizeof(cmd) - 1) : -1;
+		if (fd >= 0) close(fd);
+		if (cmd_len <= 0) continue;	/* a kernel thread */
+		cmd[cmd_len] = 0;
+		snprintf(path, sizeof(path), "/proc/%d/cgroup", pid);
+		read_text(path, cgroup, sizeof(cgroup));
+		long rss_kb = rss_pages * page_kb;
+		if (strstr(cgroup, "lxc.payload.waydroid")) {
+			/* Android: an app the user installed, by its process name */
+			int k = -1;
+			for (int i = 0; i < n_pkgs && k < 0; i++) {
+				size_t len = strlen(pkgs[i]);
+				if (!strncmp(cmd, pkgs[i], len) && (cmd[len] == 0 || cmd[len] == ':')) k = i;
+			}
+			if (k < 0) {
+				n_protected++;
+				continue;
+			}
+			int t = 0;
+			while (t < n_tasks && strcmp(tasks[t].package, pkgs[k]) != 0) t++;
+			if (t == n_tasks) {
+				if (n_tasks == MAX_TASKS) continue;
+				memset(&tasks[t], 0, sizeof(tasks[t]));
+				snprintf(tasks[t].name, sizeof(tasks[t].name), "%s", names[k]);
+				snprintf(tasks[t].package, sizeof(tasks[t].package), "%s", pkgs[k]);
+				n_tasks++;
+			}
+			if (cmd[strlen(pkgs[k])] == 0 || !tasks[t].pid) tasks[t].pid = pid;	/* the main one */
+			tasks[t].rss_kb += rss_kb;
+			tasks[t].cpu += ticks * scale;
+			continue;
+		}
+		snprintf(path, sizeof(path), "/proc/%d/status", pid);
+		unsigned uid = 0;
+		if (!read_text(path, status, sizeof(status))) continue;
+		char *uid_line = strstr(status, "\nUid:");
+		if (!uid_line || sscanf(uid_line + 5, "%u", &uid) != 1 || uid != me ||
+				pid == self || strstr(cgroup, "/session.slice/") || strstr(cgroup, "/background.slice/") ||
+				protected_name(comm)) {
+			n_protected++;	/* the system's, or the user's own services */
+			continue;
+		}
+		char name[64];
+		snprintf(name, sizeof(name), "%s", comm);
+		if (!strncmp(comm, "python", 6)) {
+			/* the SDK's zygote and Waydroid's session are the system's; an SDK
+			 * app (the zygote's child) is named for its folder, and ztOS's own
+			 * (under /usr) are the system's too */
+			bool system = false;
+			for (const char *a = cmd; a < cmd + cmd_len; a += strlen(a) + 1) {
+				system = system || strstr(a, "zygote.py") || strstr(a, "waydroid");
+			}
+			char cwd[512];
+			snprintf(path, sizeof(path), "/proc/%d/cwd", pid);
+			ssize_t n = readlink(path, cwd, sizeof(cwd) - 1);
+			if (n > 0) {
+				cwd[n] = 0;
+				const char *base = strrchr(cwd, '/');
+				system = system || !strncmp(cwd, "/usr/", 5);
+				snprintf(name, sizeof(name), "%s", base ? base + 1 : cwd);
+			}
+			if (system) {
+				n_protected++;
+				continue;
+			}
+		}
+		/* an app has windows: a helper a script runs (pactl, grep) does not
+		 * load Wayland's client library, and is not one */
+		if (!maps_wayland(pid)) {
+			continue;
+		}
+		if (n_tasks == MAX_TASKS) continue;
+		struct task *t = &tasks[n_tasks++];
+		memset(t, 0, sizeof(*t));
+		t->pid = pid;
+		snprintf(t->name, sizeof(t->name), "%s", name);
+		t->rss_kb = rss_kb;
+		t->cpu = ticks * scale;
+	}
+	if (proc) closedir(proc);
+	memcpy(cpu_seen, cpu_now, sizeof(cpu_now[0]) * n_now);
+	n_seen = n_now;
+	cpu_seen_at = now;
+	/* the heaviest first */
+	for (int i = 1; i < n_tasks; i++) {
+		struct task t = tasks[i];
+		int j = i - 1;
+		while (j >= 0 && tasks[j].rss_kb < t.rss_kb) {
+			tasks[j + 1] = tasks[j];
+			j--;
+		}
+		tasks[j + 1] = t;
+	}
+}
+
+static void task_end(const struct task *t) {
+	pid_t child = fork();
+	if (child == 0) {
+		setsid();
+		if (t->package[0]) {
+			execl("/usr/bin/sudo", "sudo", "-n", "/usr/local/libexec/ztos-waydroid-recover", "close",
+				t->package, (char *)NULL);
+		} else {
+			char script[128];
+			/* asked first, made to 3 s on */
+			snprintf(script, sizeof(script), "kill -TERM %d; sleep 3; kill -0 %d 2>/dev/null && kill -KILL %d",
+				t->pid, t->pid, t->pid);
+			execl("/bin/sh", "sh", "-c", script, (char *)NULL);
+		}
+		_exit(127);
+	}
+	snprintf(task_note, sizeof(task_note), "%s ended", t->name);
+}
+
+static double draw_tasks(cairo_t *cr) {
+	double y = zmc_header(cr, "task manager");
+	char line[128];
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	snprintf(line, sizeof(line), "%d app%s running · %d system processes protected",
+		n_tasks, n_tasks == 1 ? "" : "s", n_protected);
+	y += zmc_text(cr, line, FONT_REGULAR, 13.5, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN) + 6;
+	if (task_note[0]) {
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		y += zmc_text(cr, task_note, FONT_REGULAR, 13.5, ZMC_MARGIN, y, 0) + 6;
+	}
+	y += 10;
+	if (n_tasks == 0) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, "no apps of yours are running", FONT_REGULAR, 16, ZMC_MARGIN, y, 0);
+		return y + 40;
+	}
+	for (int i = 0; i < n_tasks; i++) {
+		const struct task *t = &tasks[i];
+		char detail[128];
+		if (t->pid == task_selected) {
+			snprintf(detail, sizeof(detail), "tap again to end it");
+		} else {
+			snprintf(detail, sizeof(detail), "%s · %ld MB · %.0f%% CPU",
+				t->package[0] ? "Android" : "Linux", (t->rss_kb + 512) / 1024, t->cpu);
+		}
+		y = zmc_entry(cr, y, t->name, detail, ACT_TASK, t->pid);
+	}
+	return y + 20;
+}
+
+static void tasks_tick(void) {
+	while (waitpid(-1, NULL, WNOHANG) > 0) {
+		/* the helpers task_end started, once done */
+	}
+	tasks_scan();
+	zmc_redraw();
+}
+
+static void task_tapped(pid_t pid) {
+	if (pid != task_selected) {
+		task_selected = pid;	/* the first tap asks */
+		task_note[0] = 0;
+		zmc_redraw();
+		return;
+	}
+	task_selected = 0;
+	/* still running, and still an app: looked at again now */
+	tasks_scan();
+	for (int i = 0; i < n_tasks; i++) {
+		if (tasks[i].pid == pid) {
+			task_end(&tasks[i]);
+			break;
+		}
+	}
+	zmc_redraw();
+}
+
 static double render(cairo_t *cr, int page) {
 	switch (page) {
 	case PAGE_HUB: return draw_hub(cr);
@@ -594,11 +942,16 @@ static double render(cairo_t *cr, int page) {
 	case PAGE_HARDWARE: return draw_hardware(cr);
 	case PAGE_ANIM: return draw_anims(cr);
 	case PAGE_PREVIEW: return draw_preview(cr);
+	case PAGE_TASKS: return draw_tasks(cr);
 	}
 	return 0;
 }
 
 static void activate(int action, int arg) {
+	if (action == ACT_TASK) {
+		task_tapped(arg);
+		return;
+	}
 	if (action == ACT_PLAY && arg >= 0 && arg < N_ANIMS) {
 		shown_anim = arg;
 		zmc_go(PAGE_PREVIEW, 1);
@@ -633,6 +986,12 @@ static void arrived(int page) {
 	case PAGE_SHELL:
 		stream_start("LC_ALL=C.UTF-8 exec tail -n 40 -F \"$HOME/.local/state/ztmetro.log\" 2>&1");
 		break;
+	case PAGE_TASKS:
+		task_selected = 0;
+		task_note[0] = 0;
+		tasks_scan();
+		zmc_every(2000, tasks_tick);	/* only while this page is open */
+		break;
 	case PAGE_PREVIEW:
 		loop_start = zmc_now_ms();
 		zmc_every(16, preview_tick);	/* frames only while it is open */
@@ -662,14 +1021,15 @@ static const struct zmc_app devtest = {
 };
 
 int main(int argc, char **argv) {
-	static const char *names[] = { "hub", "system", "sensors", "journal", "kernel", "shell", "hardware", "logs", "animations", "preview" };
+	static const char *names[] = { "hub", "system", "sensors", "journal", "kernel", "shell", "hardware", "logs", "animations", "preview", "tasks" };
 	if (argc == 4 && strcmp(argv[1], "--render") == 0) {
 		/* ZT_ANIM=N ZT_ANIM_MS=T: the animations page with N played T ms in */
 		if (getenv("ZT_ANIM")) {
 			shown_anim = atoi(getenv("ZT_ANIM"));
 		}
-		for (int i = 0; i < 10; i++) {
+		for (int i = 0; i < 11; i++) {
 			if (strcmp(names[i], argv[2]) == 0) {
+				if (i == PAGE_TASKS) tasks_scan();
 				return zmc_render_png(&devtest, i, i == PAGE_ANIM ? 1400 : 664, argv[3]);
 			}
 		}
