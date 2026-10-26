@@ -31,12 +31,15 @@ systemctl daemon-reload
 systemctl enable --now ztos-iald
 ztos-ial check
 
-say "the shell, Settings and the hardware test, against ztOSIAL"
-make -C "$B/ztmetro" ztmetro settings/ztsettings devtest/zrndevtest
-for b in ztmetro ztsettings zrndevtest; do
+say "the shell, its app list, Settings and the hardware test, against ztOSIAL"
+# (ztapps: BETA-1's leaves out Waydroid's own launchers, which skip the
+# unfreeze and hang on a frozen Android)
+make -C "$B/ztmetro" ztmetro apps/ztapps settings/ztsettings devtest/zrndevtest
+for b in ztmetro ztapps ztsettings zrndevtest; do
 	cp -n "/usr/local/bin/$b" "/usr/local/bin/$b.pre-beta1" 2>/dev/null || true
 done
 install -m755 "$B/ztmetro/ztmetro" /usr/local/bin/ztmetro
+install -m755 "$B/ztmetro/apps/ztapps" /usr/local/bin/ztapps
 install -m755 "$B/ztmetro/settings/ztsettings" /usr/local/bin/ztsettings
 install -m755 "$B/ztmetro/devtest/zrndevtest" /usr/local/bin/zrndevtest
 
