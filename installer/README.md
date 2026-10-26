@@ -1,6 +1,6 @@
 # Installing ztOS
 
-This guide installs **ztOS ALPHA-2**. The release version is recorded in the
+This guide installs **ztOS BETA-1**. The release version is recorded in the
 repository's `VERSION` file.
 
 ztOS is a phone operating system: the ztMETRO shell on Arch Linux ARM, with
@@ -14,6 +14,7 @@ installer/ztos install --mode build-store    build locally and store image for l
 installer/ztos emulator             start the emulator again later
 installer/ztos guide                how installing on the phone goes, step by step
 installer/ztos doctor               is this computer ready?
+installer/ztos build --target gsi   the generic system image alone (for ztConflo)
 ```
 
 > **Default Credentials:**
@@ -120,6 +121,23 @@ is; rebuild it from the current source to include later kernel fixes.
 | Updates | Command-line updater (`ztos-update check` / `apply`) and daily check; the Updates application is not preloaded yet |
 | Equalizers | Equalizer applications and EasyEffects are not preinstalled |
 | Developing | the ztOS SDK is installed (`ztos-sdk`), with its warm runtime started with the session; see `sdk/README.md` |
+
+## The GSI and device layers (BETA-1)
+
+ztOS is a generic system image (GSI) plus a device layer per phone, meeting
+at ztOSIAL (`design/ztOSIAL.md`). Every build is the GSI's part first, then
+the target's layer from `devices/<dir>/` (`layer.sh`, `vendor/ztos/manifest.toml`,
+`overlay/`, `packages.txt`): `starlte` takes `devices/samsung-starlte`, `qemu`
+takes `devices/qemu-virt`.
+
+```
+installer/ztos build --target gsi   build/ztos/gsi/ztos-gsi-<version>-aarch64.tar.zst (+ .sha256)
+```
+
+The GSI has no user, no kernel and no device layer: ztConflo
+(`ztconflo build <phone> --gsi <that tarball>`) adds the phone's. After the
+repositories are split, point the installer at a device repository checkout
+with `ZTOS_DEVICE=<path>`.
 
 ## How the build works
 

@@ -12,6 +12,7 @@
 # found while an app was in use. BlueZ is asked through busctl instead.
 f=${XDG_RUNTIME_DIR:-/tmp}/ztos-bt
 live=${XDG_RUNTIME_DIR:-/tmp}/ztos-live
+demoloop=${XDG_RUNTIME_DIR:-/tmp}/ztos-demoloop.active
 mkdir -p "$live"
 
 # the value of a D-Bus property as busctl prints it ("b true", "s \"Name\"")
@@ -46,6 +47,16 @@ refresh() {
 			if [ -n "$battery" ]; then echo "line=battery $battery%"; else echo "line=connected"; fi
 			[ "$streaming" = 1 ] && echo "line=playing"
 			echo "count=0"
+		} > "$live/ztsettings.new"
+		cmp -s "$live/ztsettings.new" "$live/ztsettings" && rm -f "$live/ztsettings.new" ||
+			mv "$live/ztsettings.new" "$live/ztsettings"
+	elif [ -e "$demoloop" ]; then
+		{
+			echo 'title=Settings'
+			echo 'line=Display and sound'
+			echo 'line=Accounts and apps'
+			echo 'line=Personalize your phone'
+			echo 'count=0'
 		} > "$live/ztsettings.new"
 		cmp -s "$live/ztsettings.new" "$live/ztsettings" && rm -f "$live/ztsettings.new" ||
 			mv "$live/ztsettings.new" "$live/ztsettings"

@@ -306,6 +306,34 @@ static ssize_t mcu_power_store(struct device *dev, struct device_attribute *attr
 }
 static DEVICE_ATTR_RW(mcu_power);
 
+static int hub_power_sequence(void)
+{
+	int ret;
+
+	ret = s9p_acpm_pmic_update(S2MPS18_L37CTRL, LDO_ON_MODE, LDO_ON_MODE);
+	if (ret)
+		return ret;
+	/* Enable the hub after its supply stabilizes; gpg0-4 is an unrelated,
+	 * unpulled input used by the disabled USB PHY port. */
+	gpiod_set_value(zrn_gpios[ZRN_GPIO_GPS_PWR], 0);
+	msleep(100);
+	gpiod_set_value(zrn_gpios[ZRN_GPIO_GPS_PWR], 1);
+	msleep(100);
+	return 0;
+}
+
+static ssize_t reset_store(struct device *dev, struct device_attribute *attr,
+		const char *buf, size_t size)
+{
+	int reset;
+
+	if (kstrtoint(buf, 0, &reset) || reset != 1)
+		return -EINVAL;
+	reset = hub_power_sequence();
+	return reset ? reset : size;
+}
+static DEVICE_ATTR_WO(reset);
+
 /*
  * For bring-up: the PMIC's LDO control registers. Reading lists LDO1..45
  * (top two bits: 0 off, 3 on, 1 and 2 follow the PMIC's power-enable pins);
@@ -584,6 +612,8 @@ static int __init board_init(void)
 	if (!ret)
 		ret = device_create_file(sec_hub, &dev_attr_ready);
 	if (!ret)
+		ret = device_create_file(sec_hub, &dev_attr_reset);
+	if (!ret)
 		ret = device_create_file(sec_hub, &dev_attr_ldo);
 	if (!ret)
 		ret = device_create_file(sec_hub, &dev_attr_pmic);
@@ -634,8 +664,10 @@ static int __init board_init(void)
 	}
 	/* after the probe: it clears the whole bbd state, callbacks included */
 	bbd_register(NULL, &ssp_callbacks);
-	/* the hub's supply, on from now on (the bootloader leaves it off) */
-	s9p_acpm_pmic_update(S2MPS18_L37CTRL, LDO_ON_MODE, LDO_ON_MODE);
+	/* Match Samsung's power-up order on every probe, including module reload. */
+	ret = hub_power_sequence();
+	if (ret)
+		goto err;
 	{
 		u8 a = 0, b = 0;
 

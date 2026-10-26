@@ -1,0 +1,49 @@
+# ztOSIAL manifest: Samsung Galaxy M20 (SM-M205, m20lte), Exynos 7904.
+# The GSI's ztos-iald serves each interface from the backend named here; see
+# design/ztOSIAL.md. Everything the M20 has is standard Linux by now, so every
+# interface is on its generic backend, with this phone's paths.
+
+[device]
+codename = "m20lte"
+name = "Samsung Galaxy M20"
+form_factor = "phone"
+scale = 3.0
+
+[gsi]
+min = "0.2.0"
+
+[ial.Power1]
+backend = "generic"
+battery = "/sys/class/power_supply/battery"     # drivers/zrn-s2mu004-fg.c (read-only)
+current_sign = 1                 # + charging, - draining, as ztOSIAL
+current_node = "/sys/class/power_supply/battery/current_now"
+
+[ial.Perf1]
+backend = "generic"
+gpu_devfreq = "/sys/class/devfreq/11500000.gpu"
+thermal_unit = "millicelsius"
+thermal_marks = [76, 86, 96]     # the cpu-thermal trips in the M20's tree
+keep_online = [0]
+hotplug = false                  # no zrn-hotplug here: cores stay online
+
+[ial.Display1]
+backend = "generic"
+node = "/sys/class/backlight/lm3632-bl"     # drivers/zrn-lm3632-bl.c
+
+[ial.Sensors1]
+backend = "generic"              # the LSM6DSL's IIO accelerometer and gyroscope
+
+[ial.Haptics1]
+backend = "generic"
+device = "gpio-vibrator"
+
+[ial.Android1]
+backend = "generic"
+
+[android]
+binder = "binderfs"
+gralloc = "gbm"
+memory_budget_mb = 1200
+
+[boot]
+usb_gadget_udc = "13600000.usb"

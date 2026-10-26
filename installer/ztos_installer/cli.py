@@ -7,6 +7,7 @@
     ztos install --target m20lte    ztOS on a Galaxy M20 (experimental: a port in bring-up)
     ztos emulator                start the emulator with the ztOS installed there
     ztos build --target T        only build the system (for qemu: the disk too)
+    ztos build --target gsi      the generic system image alone, for ztConflo (--gsi)
     ztos guide                   how installing on the phone goes, step by step
     ztos doctor                  is this computer ready to build ztOS?
 """
@@ -65,6 +66,8 @@ def valid_timezone(name: str):
 
 def choose_target(args) -> str:
     """Where ztOS goes; for a phone, its guide is shown and agreed to first."""
+    if args.target == "gsi":
+        sys.exit("the GSI is built, not installed: ztos build --target gsi")
     if args.target:
         target = args.target
     else:
@@ -212,7 +215,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command")
 
     def with_settings(p):
-        p.add_argument("--target", choices=["qemu", *b.PHONES])
+        p.add_argument("--target", choices=["qemu", *b.PHONES, "gsi"])
         p.add_argument("--user")
         p.add_argument("--password", help="(else asked; never stored)")
         p.add_argument("--hostname")

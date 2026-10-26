@@ -3,7 +3,6 @@
 # devices/m20lte/rootfs/overlay on top. Everything else in rootfs/overlay
 # (Cirrus audio, the sensor hub, the modem, the S9 panel, the MAX77705
 # charger, Bluetooth, CPU idle) is the S9's alone.
-etc/fstab
 etc/NetworkManager/conf.d/10-zboot.conf
 etc/systemd/logind.conf.d/10-zboot.conf
 etc/systemd/network/10-zboot-usb.network
