@@ -35,7 +35,7 @@ documentation follows [below](#ztos-itself-the-galaxy-s9-build).
 | **Sensors** | the accelerometer (apps turn with the phone), CPU and GPU temperatures, battery level |
 | **Remote control** | the screen for a VNC viewer on a computer, encrypted, from Settings |
 | **USB** | network and a serial console to a computer |
-| **Apps** | ztOS's own (Settings, People, Messaging, Music), Tube (YouTube without an account or ads), WhatsApp (a native client), GNOME Web, Firefox, Chromium, GNOME apps |
+| **Apps** | ztOS's own (Settings, People, Messaging, Music), [Tube](https://github.com/madesh-ops/ztos-tube) (YouTube without an account or ads), WhatsApp (a native client), GNOME Web, Firefox, Chromium, GNOME apps |
 
 Not yet: calls, SMS and mobile data (the modem), charging control, the earpiece,
 headphones and microphones, cameras, the fingerprint reader, NFC, the compass,
@@ -101,6 +101,7 @@ From a Galaxy S9 running ztOS (taken from the live display with `scripts/phone-g
 | `os/` | what makes the system ztOS: its packages, files (identity, session, updater, default tiles, fonts) and apps (Welcome, Updates) |
 | `ztmetro/` | the shell, its toolkit (ZrnMetroCore), the apps written with it (Settings, ZrnDevTest, Phone, Messaging, People) and the system daemons |
 | `sdk/` | the ztOS SDK: apps in Python and Qt ([sdk/README.md](sdk/README.md)) |
+| `apps/` | apps built with the SDK: Music, and Tube (also its own repository, [madesh-ops/ztos-tube](https://github.com/madesh-ops/ztos-tube)) |
 | `kernel/`, `initramfs/`, `scripts/` | the phone's boot image: mainline 7.1 with the Exynos 9810 drivers, the start-up program, flashing |
 | `audio/`, `modem/`, `sensors/`, `power/`, `leds/`, `haptics/`, `firmware/` | the phone's hardware support, as loadable kernel modules |
 | `rootfs/` | the phone's own system files (USB link, charger, fallbacks) |
