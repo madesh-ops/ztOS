@@ -55,5 +55,13 @@ memory_budget_mb = 1200
 "ro.sf.lcd_density" = 420
 "ro.product.model_for_attestation" = "Samsung Galaxy M20 (SM-M205F)"
 
+# for every Android process (android/waydroid/patch-vendor.sh): AFBC off for
+# Android's own Mesa on this r0p0 G71, as for the host's (os/overlay-m20lte
+# session.env). Not enough for Subway Surfers: its fragment jobs still fault
+# (IMPRECISE_FAULT, INSTR_INVALID_ENC in dmesg) and leave old frames in the
+# tiles not reached; nocrc, linear and sync changed nothing.
+[android.environment]
+PAN_MESA_DEBUG = "noafbc"
+
 [boot]
 usb_gadget_udc = "13600000.usb"
