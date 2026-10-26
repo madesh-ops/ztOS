@@ -232,6 +232,55 @@ def app_list_sync():
         print('app list: ' + ' '.join(result.stdout.split()), flush=True)
 
 
+# Apps compiled ahead of time (dex2oat "speed"), once per version. Android
+# does it in a background job while the phone is idle and charging, which never
+# comes here (an idle Android is frozen), so apps installed from a store stayed
+# "verify": interpreted and JIT-compiled at every start. One app at a time, in
+# the background; the record is kept across boots.
+COMPILED = pathlib.Path('/var/lib/ztos/waydroid-compiled.json')
+compiling = {}
+
+
+def compile_apps(attach):
+    job = compiling.get('job')
+    if job:
+        if job.poll() is None:
+            return
+        package, version = compiling.pop('package'), compiling.pop('version')
+        compiling.pop('job')
+        if job.returncode == 0:
+            try:
+                done = json.loads(COMPILED.read_text())
+            except (OSError, ValueError):
+                done = {}
+            done[package] = version
+            COMPILED.parent.mkdir(parents=True, exist_ok=True)
+            COMPILED.write_text(json.dumps(done, indent=1) + '\n')
+            print(f'{package} {version}: compiled ahead of time', flush=True)
+        else:
+            print(f'{package}: compiling failed ({job.returncode})', flush=True)
+            compiling.setdefault('failed', set()).add(package)
+    now = time.monotonic()
+    if now - compiling.get('checked', -60) < 60 or launch_in_progress():
+        return
+    compiling['checked'] = now
+    listed = run([*attach[:-1], attach[-1] + 'pm', 'list', 'packages', '-3', '--show-versioncode'])
+    try:
+        done = json.loads(COMPILED.read_text())
+    except (OSError, ValueError):
+        done = {}
+    for line in listed.stdout.splitlines():
+        fields = dict(part.split(':', 1) for part in line.split() if ':' in part)
+        package, version = fields.get('package'), fields.get('versionCode')
+        if package and version and done.get(package) != version and \
+                package not in compiling.get('failed', set()):
+            compiling.update(package=package, version=version, job=subprocess.Popen(
+                [*attach[:-1], attach[-1] + 'cmd', 'package', 'compile', '-m', 'speed', '-f', package],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            print(f'{package} {version}: compiling ahead of time', flush=True)
+            return
+
+
 def launch_in_progress():
     marker = ztos_user.runtime('ztos-waydroid-launching')
     try:
@@ -295,6 +344,13 @@ def maintain():
                               'screen_off_timeout', '15000'])
                 if result.returncode:
                     raise RuntimeError(result.stderr.strip())
+                # Media at full: the phone's own volume (PipeWire) sets the level.
+                # Android's index (5 of 15 here: -33 dB) under it made apps almost
+                # silent on a speaker that is quiet already.
+                result = run([*attach[:-1], attach[-1] + 'cmd', 'media_session', 'volume',
+                              '--stream', '3', '--set', '15'])
+                if result.returncode:
+                    raise RuntimeError(result.stderr.strip())
                 config = configparser.ConfigParser()
                 config.read('/var/lib/waydroid/waydroid.cfg')
                 for key, value in config.items('properties'):
@@ -322,6 +378,7 @@ def maintain():
         systemui_guard()
         storage_owner_repair()
         app_list_sync()
+        compile_apps(attach)
     if pid in configured and policy_stamp() != applied_stamp[0]:
         background_policy(attach)
     if pid in configured:
@@ -334,7 +391,8 @@ def maintain():
         # Do not infer visibility from the foreground activity or host focus.
         windows = run([*attach[:-1], attach[-1] + 'getprop', 'waydroid.open_windows']).stdout.strip()
         suspend = run([*attach[:-1], attach[-1] + 'getprop', 'persist.waydroid.suspend']).stdout.strip()
-        if windows == '0' and suspend == 'true' and not launch_in_progress():
+        # (not while an app is being compiled: that would wait for the next use)
+        if windows == '0' and suspend == 'true' and not launch_in_progress() and not compiling.get('job'):
             since = idle.setdefault(pid, time.monotonic())
             if time.monotonic() - since >= 15:
                 result = run(['waydroid', 'container', 'freeze'])

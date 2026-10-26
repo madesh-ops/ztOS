@@ -49,8 +49,10 @@ case $1 in
         ;;
     close)
         [[ $# == 2 && $2 =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]] || exit 2
-        env XDG_RUNTIME_DIR="$ZTOS_RUNTIME_DIR" DBUS_SESSION_BUS_ADDRESS="unix:path=$ZTOS_RUNTIME_DIR/bus" WAYLAND_DISPLAY=wayland-0 \
-            timeout 10 waydroid shell -- am force-stop "$2"
+        # Android's own cmd (a native binary) straight into the container:
+        # 0.2 s, where waydroid shell and am (a Java program) took 1.4 s
+        timeout 10 lxc-attach "${lxc_args[@]}" --clear-env -v PATH=/system/bin:/system/xbin:/vendor/bin -- \
+            /system/bin/cmd activity force-stop "$2"
         ;;
     recover)
         [[ $# == 1 ]] || exit 2

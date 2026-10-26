@@ -5093,6 +5093,19 @@ static void screen_set(struct zt_server *server, bool on);
 static void activity(struct zt_server *server);
 static void run_detached(const char *program, const char *a1, const char *a2, const char *a3);
 
+/* An Android app (Waydroid) quit from the shell: force-stopped in Android at
+ * once, straight through the recovery helper (Android's native cmd in the
+ * container, 0.2 s) rather than ztos-android and waydroid shell (1.5 s). False
+ * when it is no Android app. */
+static bool waydroid_close(struct zt_toplevel *toplevel) {
+	const char *app_id = toplevel->xdg_toplevel->app_id;
+	if (!toplevel->android_runtime || !app_id || strncmp(app_id, "waydroid.", 9) != 0) {
+		return false;
+	}
+	run_detached("sh", "-c", "exec sudo -n /usr/local/libexec/ztos-waydroid-recover close \"$0\"", app_id + 9);
+	return true;
+}
+
 static void draw_power(struct zt_server *server) {
 	cairo_t *cr;
 	double w = server->width, h = server->height;
@@ -10202,9 +10215,8 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
                     switcher_forget(server, gone);
                     hap(server, HAP_CLICK, HG_NAV);
                     break;
-                } else if (gone->android_runtime && gone->xdg_toplevel->app_id &&
-						!strncmp(gone->xdg_toplevel->app_id, "waydroid.", 9)) {
-					run_detached("ztos-android", "close", gone->xdg_toplevel->app_id + 9, NULL);
+                } else if (waydroid_close(gone)) {
+					/* (stopped in Android: its window goes with it) */
 				} else {
 					wlr_xdg_toplevel_send_close(gone->xdg_toplevel);
 					if (pid > 1 && pid != getpid()) {
@@ -10378,7 +10390,10 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
 			if (background_app(server->shown)) {
                 server->shown->background_hidden = true;
                 show_toplevel(server, NULL);
-            } else wlr_xdg_toplevel_send_close(server->shown->xdg_toplevel);
+            } else if (waydroid_close(server->shown)) {
+				/* gone from the screen now, not when Android has let it go */
+				show_toplevel(server, NULL);
+			} else wlr_xdg_toplevel_send_close(server->shown->xdg_toplevel);
 		}
 		break;
 	case ROLE_NAV:
