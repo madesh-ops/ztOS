@@ -1526,7 +1526,7 @@ static bool draw_icon_symbol(cairo_t *cr, const char *name, double cx, double cy
 		return false;
 	}
 	PangoLayout *layout = pango_cairo_create_layout(cr);
-	PangoFontDescription *desc = pango_font_description_from_string("Segoe UI Symbol");
+	PangoFontDescription *desc = pango_font_description_from_string("Segoe UI Symbol, Segoe MDL2 Assets");
 	pango_font_description_set_absolute_size(desc, s * 1.1 * PANGO_SCALE);
 	pango_layout_set_font_description(layout, desc);
 	/* Unicode's battery defaults to emoji presentation. Keep all mapped
@@ -3109,9 +3109,15 @@ static cairo_surface_t *glyph_get(struct zt_server *server, const char *key) {
 	snprintf(glyph->key, sizeof(glyph->key), "%s", key);
 	glyph->surface = NULL;
 	char below[128], path[640];
-	snprintf(below, sizeof(below), "icons/%s.a8", key);
-	cache_path(path, sizeof(path), below);
-	FILE *f = fopen(path, "rb");
+	/* an app whose icon is a file is listed (and its glyph named) with the
+	 * file's extension; a tile may have been pinned by the bare name */
+	static const char *const ext[] = { "", ".svg", ".png" };
+	FILE *f = NULL;
+	for (size_t i = 0; !f && i < sizeof(ext) / sizeof(ext[0]); i++) {
+		snprintf(below, sizeof(below), "icons/%s%s.a8", key, ext[i]);
+		cache_path(path, sizeof(path), below);
+		f = fopen(path, "rb");
+	}
 	if (!f) {
 		return NULL;
 	}
