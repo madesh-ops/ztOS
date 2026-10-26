@@ -143,6 +143,71 @@ static double draw_logs(cairo_t *cr) {
 	return y + 20;
 }
 
+/* Memory as one bar: what apps hold, the file cache the kernel gives back
+ * when an app needs it, and what is free, with a legend under it. */
+static double draw_memory(cairo_t *cr, double y, const struct sysinfo *si) {
+	long total = 0, free_kb = 0, avail = -1;
+	FILE *f = fopen("/proc/meminfo", "r");
+	char line[128];
+	while (f && fgets(line, sizeof(line), f)) {
+		sscanf(line, "MemTotal: %ld kB", &total);
+		sscanf(line, "MemFree: %ld kB", &free_kb);
+		sscanf(line, "MemAvailable: %ld kB", &avail);
+	}
+	if (f) {
+		fclose(f);
+	}
+	if (total <= 0 || avail < 0) {
+		return y;
+	}
+	struct {
+		const char *name;
+		long kb;
+		double r, g, b;		/* r < 0: the accent colour */
+	} parts[] = {
+		{ "Apps", total - avail, -1, 0, 0 },
+		{ "Cache (given back when needed)", avail - free_kb, 0.55, 0.55, 0.55 },
+		{ "Free", free_kb, 0.22, 0.22, 0.22 },
+	};
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, "Memory", FONT_REGULAR, 13, ZMC_MARGIN, y, 0);
+	char value[96];
+	snprintf(value, sizeof(value), "%.0f MB available of %.0f MB", avail / 1024.0, total / 1024.0);
+	cairo_set_source_rgb(cr, 1, 1, 1);
+	y += 20 + zmc_text(cr, value, FONT_REGULAR, 16, ZMC_MARGIN, y + 18, 0) + 8;
+	double x = ZMC_MARGIN, w = zmc.width - 2 * ZMC_MARGIN, h = 16;
+	for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+		double pw = w * (double)parts[i].kb / (double)total;
+		if (parts[i].r < 0) {
+			zmc_accent(cr);
+		} else {
+			cairo_set_source_rgb(cr, parts[i].r, parts[i].g, parts[i].b);
+		}
+		cairo_rectangle(cr, x, y, i + 1 < sizeof(parts) / sizeof(parts[0]) ? pw : ZMC_MARGIN + w - x, h);
+		cairo_fill(cr);
+		x += pw;
+	}
+	y += h + 10;
+	for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+		if (parts[i].r < 0) {
+			zmc_accent(cr);
+		} else {
+			cairo_set_source_rgb(cr, parts[i].r, parts[i].g, parts[i].b);
+		}
+		cairo_rectangle(cr, ZMC_MARGIN, y + 4, 12, 12);
+		cairo_fill(cr);
+		snprintf(value, sizeof(value), "%s  %.0f MB", parts[i].name, parts[i].kb / 1024.0);
+		cairo_set_source_rgb(cr, 1, 1, 1);
+		y += zmc_text(cr, value, FONT_REGULAR, 13.5, ZMC_MARGIN + 20, y, 0) + 4;
+	}
+	snprintf(value, sizeof(value), "Swap (compressed in RAM): %.0f MB used of %.0f MB",
+		(si->totalswap - si->freeswap) * (double)si->mem_unit / 1048576.0,
+		si->totalswap * (double)si->mem_unit / 1048576.0);
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	y += zmc_text(cr, value, FONT_REGULAR, 13, ZMC_MARGIN, y + 2, 0) + 16;
+	return y;
+}
+
 static double draw_system(cairo_t *cr) {
 	char value[256], a[96];
 	double y = zmc_header(cr, "system");
@@ -157,30 +222,7 @@ static double draw_system(cairo_t *cr) {
 	if (sysinfo(&si) == 0) {
 		snprintf(value, sizeof(value), "%ld h %ld min", si.uptime / 3600, (si.uptime % 3600) / 60);
 		y = zmc_field(cr, y, "Uptime", value);
-		/* what apps can have (MemAvailable: free plus the cache the kernel
-		 * gives back on demand), not sysinfo's "free", which only shrinks as
-		 * the file cache fills the RAM nobody uses */
-		long avail_kb = -1, cache_kb = 0;
-		FILE *mi = fopen("/proc/meminfo", "r");
-		char line[128];
-		while (mi && fgets(line, sizeof(line), mi)) {
-			sscanf(line, "MemAvailable: %ld kB", &avail_kb);
-			sscanf(line, "Cached: %ld kB", &cache_kb);
-		}
-		if (mi) {
-			fclose(mi);
-		}
-		if (avail_kb >= 0) {
-			snprintf(value, sizeof(value), "%.0f MB available of %.0f MB (%.0f MB free, %.0f MB cache), "
-				"%.0f MB swap used", avail_kb / 1e3 * 1.024, si.totalram * (double)si.mem_unit / 1e6,
-				si.freeram * (double)si.mem_unit / 1e6, cache_kb / 1e3 * 1.024,
-				(si.totalswap - si.freeswap) * (double)si.mem_unit / 1e6);
-		} else {
-			snprintf(value, sizeof(value), "%.0f MB free of %.0f MB, %.0f MB swap used",
-				si.freeram * (double)si.mem_unit / 1e6, si.totalram * (double)si.mem_unit / 1e6,
-				(si.totalswap - si.freeswap) * (double)si.mem_unit / 1e6);
-		}
-		y = zmc_field(cr, y, "Memory", value);
+		y = draw_memory(cr, y, &si);
 		snprintf(value, sizeof(value), "%d processes", si.procs);
 		y = zmc_field(cr, y, "Tasks", value);
 	}
