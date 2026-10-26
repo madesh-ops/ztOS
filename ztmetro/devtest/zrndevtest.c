@@ -157,9 +157,29 @@ static double draw_system(cairo_t *cr) {
 	if (sysinfo(&si) == 0) {
 		snprintf(value, sizeof(value), "%ld h %ld min", si.uptime / 3600, (si.uptime % 3600) / 60);
 		y = zmc_field(cr, y, "Uptime", value);
-		snprintf(value, sizeof(value), "%.0f MB free of %.0f MB, %.0f MB swap used",
-			si.freeram * (double)si.mem_unit / 1e6, si.totalram * (double)si.mem_unit / 1e6,
-			(si.totalswap - si.freeswap) * (double)si.mem_unit / 1e6);
+		/* what apps can have (MemAvailable: free plus the cache the kernel
+		 * gives back on demand), not sysinfo's "free", which only shrinks as
+		 * the file cache fills the RAM nobody uses */
+		long avail_kb = -1, cache_kb = 0;
+		FILE *mi = fopen("/proc/meminfo", "r");
+		char line[128];
+		while (mi && fgets(line, sizeof(line), mi)) {
+			sscanf(line, "MemAvailable: %ld kB", &avail_kb);
+			sscanf(line, "Cached: %ld kB", &cache_kb);
+		}
+		if (mi) {
+			fclose(mi);
+		}
+		if (avail_kb >= 0) {
+			snprintf(value, sizeof(value), "%.0f MB available of %.0f MB (%.0f MB free, %.0f MB cache), "
+				"%.0f MB swap used", avail_kb / 1e3 * 1.024, si.totalram * (double)si.mem_unit / 1e6,
+				si.freeram * (double)si.mem_unit / 1e6, cache_kb / 1e3 * 1.024,
+				(si.totalswap - si.freeswap) * (double)si.mem_unit / 1e6);
+		} else {
+			snprintf(value, sizeof(value), "%.0f MB free of %.0f MB, %.0f MB swap used",
+				si.freeram * (double)si.mem_unit / 1e6, si.totalram * (double)si.mem_unit / 1e6,
+				(si.totalswap - si.freeswap) * (double)si.mem_unit / 1e6);
+		}
 		y = zmc_field(cr, y, "Memory", value);
 		snprintf(value, sizeof(value), "%d processes", si.procs);
 		y = zmc_field(cr, y, "Tasks", value);
