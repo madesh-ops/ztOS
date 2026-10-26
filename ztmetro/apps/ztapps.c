@@ -12,6 +12,9 @@
  *     ~/.cache/ztmetro/apps            name | glyph | command | desktop path
  *     ~/.cache/ztmetro/icons/KEY.a8    the glyph: "ZA8\1", width, height (u16
  *                                      each), then one byte of cover per pixel
+ *     ~/.cache/ztmetro/icons/KEY.color.png   an Android app's (Waydroid's) icon
+ *                                      as it is, which the shell draws in its
+ *                                      own colours instead of the glyph
  *
  * Without arguments it keeps running: it looks again every 20 s (the folders'
  * own change times, which costs nothing), writes the list anew when an
@@ -606,6 +609,55 @@ static bool glyph_ensure(const char *icon, char *key, size_t key_size) {
 	return ok && rename(tmp, file) == 0;
 }
 
+/* An Android app (run by Waydroid) keeps its own icon: `icon` (a file) in its
+ * colours, fitted into GLYPH x GLYPH, as KEY.color.png, unless one newer than
+ * the icon is there already. */
+static bool colour_ensure(const char *icon, const char *key) {
+	char file[768], tmp[800];
+	snprintf(file, sizeof(file), "%s/icons/%s.color.png", cache_dir, key);
+	struct stat have, source;
+	if (stat(icon, &source) != 0) {
+		return false;
+	}
+	if (stat(file, &have) == 0 && have.st_mtime >= source.st_mtime) {
+		return true;
+	}
+	GError *error = NULL;
+	const char *dot = strrchr(icon, '.');
+	GdkPixbuf *loaded = dot && (strcmp(dot, ".svg") == 0 || strcmp(dot, ".svgz") == 0) ?
+		svg_load(icon) : gdk_pixbuf_new_from_file_at_scale(icon, GLYPH, GLYPH, TRUE, &error);
+	if (error) {
+		g_error_free(error);
+	}
+	if (!loaded) {
+		return false;
+	}
+	GdkPixbuf *pixbuf = gdk_pixbuf_add_alpha(loaded, FALSE, 0, 0, 0);
+	g_object_unref(loaded);
+	int w = gdk_pixbuf_get_width(pixbuf), h = gdk_pixbuf_get_height(pixbuf);
+	int stride = gdk_pixbuf_get_rowstride(pixbuf);
+	const uint8_t *px = gdk_pixbuf_get_pixels(pixbuf);
+	cairo_surface_t *surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, GLYPH, GLYPH);
+	uint32_t *out = (uint32_t *)cairo_image_surface_get_data(surface);
+	int out_stride = cairo_image_surface_get_stride(surface) / 4;
+	int ox = (GLYPH - w) / 2, oy = (GLYPH - h) / 2;
+	for (int y = 0; y < h && y + oy < GLYPH; y++) {
+		for (int x = 0; x < w && x + ox < GLYPH; x++) {
+			const uint8_t *p = px + (size_t)y * stride + (size_t)x * 4;
+			uint32_t a = p[3];
+			/* cairo's pixels are premultiplied */
+			out[(y + oy) * out_stride + x + ox] = a << 24 | (p[0] * a / 255) << 16 |
+				(p[1] * a / 255) << 8 | (p[2] * a / 255);
+		}
+	}
+	cairo_surface_mark_dirty(surface);
+	g_object_unref(pixbuf);
+	snprintf(tmp, sizeof(tmp), "%s.new", file);
+	bool ok = cairo_surface_write_to_png(surface, tmp) == CAIRO_STATUS_SUCCESS;
+	cairo_surface_destroy(surface);
+	return ok && rename(tmp, file) == 0;
+}
+
 /* System apps use Segoe UI Symbol, never a theme's silhouette. The battery
  * uses Symbol's monochrome Unicode glyph, not a colour emoji fallback. */
 static bool system_glyph(const char *id, char *key, size_t key_size) {
@@ -852,6 +904,18 @@ static bool scan(bool print) {
 			memcpy(id, app->id, sizeof(id));
 			id[strlen(id) - 8] = 0;
 			if (!glyph_ensure(id, app->key, sizeof(app->key))) {
+				snprintf(app->key, sizeof(app->key), "-");
+			}
+		}
+		if (strstr(app->command, "--runtime waydroid") && app->icon[0] == '/') {
+			/* named for the icon file, as glyph_ensure names a glyph */
+			const char *base = strrchr(app->icon, '/') + 1;
+			size_t n = 0;
+			for (const char *c = base; *c && n + 1 < sizeof(app->key); c++) {
+				app->key[n++] = isalnum((unsigned char)*c) || *c == '-' || *c == '_' || *c == '.' ? *c : '_';
+			}
+			app->key[n] = 0;
+			if (!colour_ensure(app->icon, app->key) && !glyph_ensure(app->icon, app->key, sizeof(app->key))) {
 				snprintf(app->key, sizeof(app->key), "-");
 			}
 		}

@@ -306,7 +306,8 @@ struct app_item {
 
 struct glyph {
 	char key[72];
-	cairo_surface_t *surface;	/* A8; NULL: looked for and not there */
+	cairo_surface_t *surface;	/* A8, or ARGB32 for an icon kept in its own
+					 * colours; NULL: looked for and not there */
 };
 
 /* What was started from a tile or the list, to bring it forward instead of
@@ -3112,6 +3113,21 @@ static cairo_surface_t *glyph_get(struct zt_server *server, const char *key) {
 	/* an app whose icon is a file is listed (and its glyph named) with the
 	 * file's extension; a tile may have been pinned by the bare name */
 	static const char *const ext[] = { "", ".svg", ".png" };
+	/* an Android app's icon in its own colours (ztapps: KEY.color.png) */
+	for (size_t i = 0; i < sizeof(ext) / sizeof(ext[0]); i++) {
+		snprintf(below, sizeof(below), "icons/%s%s.color.png", key, ext[i]);
+		cache_path(path, sizeof(path), below);
+		if (access(path, R_OK) != 0) {
+			continue;
+		}
+		cairo_surface_t *colour = cairo_image_surface_create_from_png(path);
+		if (cairo_surface_status(colour) == CAIRO_STATUS_SUCCESS &&
+				cairo_image_surface_get_width(colour) == GLYPH_PX) {
+			glyph->surface = colour;
+			return colour;
+		}
+		cairo_surface_destroy(colour);
+	}
 	FILE *f = NULL;
 	for (size_t i = 0; !f && i < sizeof(ext) / sizeof(ext[0]); i++) {
 		snprintf(below, sizeof(below), "icons/%s%s.a8", key, ext[i]);
@@ -3197,7 +3213,14 @@ static void draw_glyph(struct zt_server *server, cairo_t *cr, const char *icon,
 		cairo_save(cr);
 		cairo_translate(cr, cx - s / 2, cy - s / 2);
 		cairo_scale(cr, s / GLYPH_PX, s / GLYPH_PX);
-		cairo_mask_surface(cr, glyph, 0, 0);
+		if (cairo_image_surface_get_format(glyph) == CAIRO_FORMAT_ARGB32) {
+			/* the app's own icon, as it is: not in the theme's colour */
+			cairo_set_source_surface(cr, glyph, 0, 0);
+			cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_GOOD);
+			cairo_paint(cr);
+		} else {
+			cairo_mask_surface(cr, glyph, 0, 0);
+		}
 		cairo_restore(cr);
 		return;
 	}
