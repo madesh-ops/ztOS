@@ -39,6 +39,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/resource.h>
@@ -508,6 +509,7 @@ struct zt_server {
 	/* looked at once a second while the screen is on: whether the network
 	 * in use is carrying anything (its arrow), and the charger's plug */
 	struct wl_event_source *net_timer;
+	struct wl_event_source *trim_timer;	/* memory back to the system (memory_trim) */
 	unsigned long long net_bytes;
 	bool net_active, charging;
 	float st_plug;			/* the plug in the battery while it charges: it comes and goes */
@@ -4771,6 +4773,26 @@ static bool bt_state_read(struct zt_server *server) {
 	server->bt_battery = battery;
 	snprintf(server->bt_name, sizeof(server->bt_name), "%s", name);
 	return changed;
+}
+
+/* Every drawing is a cairo picture of up to the whole screen (10 MB), freed
+ * once it is a texture. glibc raises its mmap threshold each time such a
+ * picture is freed, so the next ones come from the heap, which then keeps
+ * what they leave (82 MB of heap, 48 MB of it free). Fixed thresholds
+ * (memory_setup) give big pictures back at once; while nothing moves, the
+ * rest goes back every so often. */
+static void memory_setup(void) {
+	mallopt(M_MMAP_THRESHOLD, 256 * 1024);
+	mallopt(M_TRIM_THRESHOLD, 1024 * 1024);
+}
+
+static int memory_trim(void *data) {
+	struct zt_server *server = data;
+	if (!server->moving) {
+		malloc_trim(0);
+	}
+	wl_event_source_timer_update(server->trim_timer, 20000);
+	return 0;
 }
 
 static int net_tick(void *data) {
@@ -11246,6 +11268,7 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 
 int main(int argc, char *argv[]) {
 	wlr_log_init(getenv("ZTMETRO_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);
+	memory_setup();
 	/* children are reaped by the kernel; nothing here waits for them */
 	signal(SIGCHLD, SIG_IGN);
 
@@ -11381,6 +11404,8 @@ int main(int argc, char *argv[]) {
 	server.power_off_timer = wl_event_loop_add_timer(server.loop, power_off_step, &server);
 	server.net_timer = wl_event_loop_add_timer(server.loop, net_tick, &server);
 	wl_event_source_timer_update(server.net_timer, 3000);
+	server.trim_timer = wl_event_loop_add_timer(server.loop, memory_trim, &server);
+	wl_event_source_timer_update(server.trim_timer, 20000);
 	server.st_plug = 1.0f;
 	server.charging = on_charger();
 	server.toast_timer = wl_event_loop_add_timer(server.loop, toast_hide, &server);

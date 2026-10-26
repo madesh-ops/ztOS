@@ -149,6 +149,20 @@ def main():
     except OSError:
         pass
     where = path()
+    # One warm runtime: one left from an earlier session (the shell restarted)
+    # would otherwise stay, ~40 MB, with nothing ever asking it again once
+    # this one takes the socket. It goes; the apps it started are processes
+    # of their own and stay.
+    try:
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(1.0)
+        probe.connect(where)
+        pid = struct.unpack("3i", probe.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[0]
+        probe.close()
+        if pid > 1 and pid != os.getpid():
+            os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         os.unlink(where)

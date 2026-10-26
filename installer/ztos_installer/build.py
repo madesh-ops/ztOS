@@ -336,8 +336,9 @@ if [ "$TARGET" = m20lte ]; then
 		ch systemctl enable "$u" > /dev/null 2>&1 || echo "(no $u)"
 	done
 	# RAM: no screen reader and no Flatpak here, yet the first GTK app starts
-	# the accessibility bus and the document portal (~50 MB) for good
-	ch systemctl --global mask at-spi-dbus-bus.service xdg-document-portal.service > /dev/null 2>&1 || true
+	# the accessibility bus and the document portal (~50 MB) for good, and the
+	# desktop portals (~55 MB more; GTK apps fall back to their own dialogs)
+	ch systemctl --global mask at-spi-dbus-bus.service xdg-document-portal.service 		xdg-desktop-portal.service xdg-desktop-portal-gtk.service xdg-permission-store.service > /dev/null 2>&1 || true
 fi
 if [ "$TARGET" = qemu ]; then
 	cat > "$R/etc/fstab" <<'FSTAB'
