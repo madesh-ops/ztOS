@@ -19,7 +19,11 @@ case $1 in
         ;;
     freeze)
         [[ $# == 1 ]] || exit 2
-        if [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == RUNNING ]]; then
+        # Never while Android is still booting: a first boot (every app
+        # compiled) takes minutes, and frozen with the screen off it would
+        # never finish. The next freeze request after boot applies.
+        if [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == RUNNING ]] &&
+           [[ $(timeout 3 lxc-attach "${lxc_args[@]}" --clear-env -v PATH=/system/bin:/system/xbin:/vendor/bin -- /system/bin/getprop sys.boot_completed 2>/dev/null) == 1 ]]; then
             timeout 5 waydroid container freeze
         fi
         ;;

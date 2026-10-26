@@ -33,6 +33,7 @@ python3 - "$here/waydroid.cfg" <<'PY'
 import configparser
 import os
 import sys
+import tomllib
 path = '/var/lib/waydroid/waydroid.cfg'
 config = configparser.ConfigParser()
 config.read(path)
@@ -43,6 +44,15 @@ for section in new.sections():
         config.add_section(section)
     for key, value in new[section].items():
         config[section][key] = value
+# This phone's own properties (its window size, density, model) from its
+# manifest's [android.properties], over waydroid.cfg's (the Galaxy S9's).
+try:
+    with open('/vendor/ztos/manifest.toml', 'rb') as stream:
+        device = tomllib.load(stream).get('android', {}).get('properties', {})
+except FileNotFoundError:
+    device = {}
+for key, value in device.items():
+    config['properties'][key] = str(value)
 with open(path + '.ztos-new', 'w') as output:
     config.write(output)
 os.chmod(path + '.ztos-new', 0o644)

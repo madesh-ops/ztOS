@@ -11,8 +11,8 @@ python3 - <<'PYCONFIG'
 import configparser
 config = configparser.ConfigParser()
 config.read('/var/lib/waydroid/waydroid.cfg')
-if config.get('properties', 'persist.waydroid.width', fallback='') != '360' or config.get('properties', 'persist.waydroid.height', fallback='') != '672':
-    raise SystemExit('Composer hotplug fix requires fixed 360x672 logical geometry.')
+if not config.get('properties', 'persist.waydroid.width', fallback='').isdigit() or not config.get('properties', 'persist.waydroid.height', fallback='').isdigit():
+    raise SystemExit('Composer hotplug fix requires a fixed logical geometry (persist.waydroid.width and height).')
 PYCONFIG
 cp -an --reflink=auto --sparse=always "$images/vendor.img" "$images/vendor.img.stock"
 work=$(mktemp -d "$images/.vendor.XXXXXX")

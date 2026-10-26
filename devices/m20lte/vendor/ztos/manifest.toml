@@ -45,5 +45,15 @@ binder = "binderfs"
 gralloc = "gbm"
 memory_budget_mb = 1200
 
+# over android/waydroid/waydroid.cfg's (the S9's): the room ztMETRO gives an
+# app at scale 3 (1080x2340 is 360x780 points, less the status and nav bars'
+# 68), Android's density for the same scale (140 per point of scale, as the
+# S9's 560 at 4), and this phone's name
+[android.properties]
+"persist.waydroid.width" = 360
+"persist.waydroid.height" = 712
+"ro.sf.lcd_density" = 420
+"ro.product.model_for_attestation" = "Samsung Galaxy M20 (SM-M205F)"
+
 [boot]
 usb_gadget_udc = "13600000.usb"
