@@ -274,8 +274,12 @@ def compile_apps(attach):
         package, version = fields.get('package'), fields.get('versionCode')
         if package and version and done.get(package) != version and \
                 package not in compiling.get('failed', set()):
+            # never an app in use (and no -f, which stops the app first):
+            # one running waits for a time it is not
+            if run([*attach[:-1], attach[-1] + 'pidof', package]).stdout.strip():
+                continue
             compiling.update(package=package, version=version, job=subprocess.Popen(
-                [*attach[:-1], attach[-1] + 'cmd', 'package', 'compile', '-m', 'speed', '-f', package],
+                [*attach[:-1], attach[-1] + 'cmd', 'package', 'compile', '-m', 'speed', package],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             print(f'{package} {version}: compiling ahead of time', flush=True)
             return

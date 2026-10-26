@@ -13,7 +13,7 @@ case $1 in
         [[ $# == 1 ]] || exit 2
         systemctl start waydroid-container.service
         if [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == FROZEN ]]; then
-            timeout 10 waydroid container unfreeze
+            timeout 10 lxc-unfreeze "${lxc_args[@]}"
         fi
         /usr/local/libexec/ztos-waydroid-audio
         ;;
@@ -24,14 +24,14 @@ case $1 in
         # never finish. The next freeze request after boot applies.
         if [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == RUNNING ]] &&
            [[ $(timeout 3 lxc-attach "${lxc_args[@]}" --clear-env -v PATH=/system/bin:/system/xbin:/vendor/bin -- /system/bin/getprop sys.boot_completed 2>/dev/null) == 1 ]]; then
-            timeout 5 waydroid container freeze
+            timeout 5 lxc-freeze "${lxc_args[@]}"
         fi
         ;;
     unfreeze)
         [[ $# == 1 ]] || exit 2
         systemctl start waydroid-container.service
         if [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == FROZEN ]]; then
-            timeout 10 waydroid container unfreeze
+            timeout 10 lxc-unfreeze "${lxc_args[@]}"
         fi
         /usr/local/libexec/ztos-waydroid-audio
         ;;
@@ -49,10 +49,23 @@ case $1 in
         ;;
     close)
         [[ $# == 2 && $2 =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]] || exit 2
+        # An app quit from the switcher after going back to Start finds
+        # Android frozen (the idle policy): nothing in it can answer then, so
+        # thaw it, stop the app, give Android a moment to take its window
+        # away, and freeze it again as it was.
+        frozen=false
+        if [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == FROZEN ]]; then
+            frozen=true
+            timeout 10 lxc-unfreeze "${lxc_args[@]}"
+        fi
         # Android's own cmd (a native binary) straight into the container:
         # 0.2 s, where waydroid shell and am (a Java program) took 1.4 s
         timeout 10 lxc-attach "${lxc_args[@]}" --clear-env -v PATH=/system/bin:/system/xbin:/vendor/bin -- \
             /system/bin/cmd activity force-stop "$2"
+        if $frozen; then
+            sleep 0.5
+            timeout 5 lxc-freeze "${lxc_args[@]}"
+        fi
         ;;
     recover)
         [[ $# == 1 ]] || exit 2
@@ -72,7 +85,7 @@ case $1 in
                 /usr/local/libexec/ztos-waydroid-audio
                 exit 0
             fi
-            sleep 1
+            sleep 0.5
         done
         echo 'Android failed readiness check.' >&2
         exit 1
