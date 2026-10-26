@@ -26,7 +26,8 @@
 
 enum page { PAGE_HUB, PAGE_SYSTEM, PAGE_SENSORS, PAGE_JOURNAL, PAGE_KERNEL, PAGE_SHELL, PAGE_HARDWARE,
 	PAGE_LOGS /* the hub's second tab */, PAGE_ANIM, PAGE_PREVIEW, PAGE_TASKS };
-enum action { ACT_OPEN = 1, ACT_PLAY, ACT_TASK, ACT_TASK_KIND, ACT_TASK_END, ACT_TASK_CANCEL };
+enum action { ACT_OPEN = 1, ACT_PLAY, ACT_TASK, ACT_TASK_KIND, ACT_TASK_END, ACT_TASK_CANCEL,
+	ACT_ANDROID, ACT_ANDROID_STOP };
 
 #define MAX_LINES	70	/* of a log, newest first */
 #define LINE_LEN	240
@@ -655,6 +656,7 @@ static struct task tasks[MAX_TASKS];
 static int n_tasks, n_kernel;
 static bool kind_open[N_KINDS] = { [KIND_APPS] = true };
 static pid_t task_asked;		/* the warning box is open for it */
+static bool android_asked;		/* the box asks about shutting Android down */
 static char task_note[96];		/* what was ended, for a moment */
 
 /* CPU time last seen, per pid, for the percentages */
@@ -968,24 +970,22 @@ static void task_detail(const struct task *t, char *out, size_t size) {
 	}
 }
 
-/* The warning box over the page: what ending it does, and end or cancel. A
- * tap anywhere else cancels. Drawn last; it takes every tap. */
-static void task_box(cairo_t *cr, const struct task *t) {
+/* A warning box over the page: a title, a grey line, what doing it does, and
+ * `yes` or cancel. A tap anywhere else cancels. Drawn last; it takes every tap. */
+static void warn_box(cairo_t *cr, const char *title, const char *detail, const char *warning,
+		const char *yes, int yes_action, int yes_arg) {
 	cairo_save(cr);
 	cairo_set_source_rgba(cr, 0, 0, 0, 0.75);
 	cairo_paint(cr);
 	cairo_restore(cr);
 	zmc.n_hits = 0;
 	double w = zmc.width, x = ZMC_MARGIN, y = zmc.scroll + 96, tw = w - 2 * ZMC_MARGIN;
-	char title[96], detail[160];
-	snprintf(title, sizeof(title), "end %s?", t->name);
-	task_detail(t, detail, sizeof(detail));
 	/* the box's height first, off screen, then the box */
 	cairo_surface_t *probe_s = cairo_image_surface_create(CAIRO_FORMAT_A8, 1, 1);
 	cairo_t *probe = cairo_create(probe_s);
 	double h = 24 + zmc_text(probe, title, FONT_SEMILIGHT, 26, x, 0, tw) + 8 +
 		zmc_text(probe, detail, FONT_REGULAR, 12.5, x, 0, tw) + 14 +
-		zmc_text(probe, kinds[t->kind].warning, FONT_REGULAR, 15, x, 0, tw) + 24 + 40 + 24;
+		zmc_text(probe, warning, FONT_REGULAR, 15, x, 0, tw) + 24 + 40 + 24;
 	cairo_destroy(probe);
 	cairo_surface_destroy(probe_s);
 	cairo_set_source_rgb(cr, 0.12, 0.12, 0.12);
@@ -1000,12 +1000,41 @@ static void task_box(cairo_t *cr, const struct task *t) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	y += zmc_text(cr, detail, FONT_REGULAR, 12.5, x, y, tw) + 14;
 	cairo_set_source_rgb(cr, 1, 1, 1);
-	y += zmc_text(cr, kinds[t->kind].warning, FONT_REGULAR, 15, x, y, tw) + 24;
+	y += zmc_text(cr, warning, FONT_REGULAR, 15, x, y, tw) + 24;
 	double bw = (tw - 12) / 2;
-	zmc_button(cr, x, y, bw, "end", ACT_TASK_END, t->pid);
+	zmc_button(cr, x, y, bw, yes, yes_action, yes_arg);
 	zmc_button(cr, x + bw + 12, y, bw, "cancel", ACT_TASK_CANCEL, 0);
 	/* (the first hit under a point is the one taken: the buttons, then the rest) */
 	zmc_add_hit(0, 0, w, 100000, ACT_TASK_CANCEL, 0);
+}
+
+static void task_box(cairo_t *cr, const struct task *t) {
+	char title[96], detail[160];
+	snprintf(title, sizeof(title), "end %s?", t->name);
+	task_detail(t, detail, sizeof(detail));
+	warn_box(cr, title, detail, kinds[t->kind].warning, "end", ACT_TASK_END, t->pid);
+}
+
+/* Android (Waydroid's container) is up: its cgroup is there while it runs or
+ * is frozen */
+static bool android_running(void) {
+	return access("/sys/fs/cgroup/lxc.payload.waydroid/cgroup.procs", F_OK) == 0;
+}
+
+/* Shut Android down (thawed first: a frozen one cannot stop), or start it as
+ * at login (ztos-waydroid-boot), in the background */
+static void android_power(bool start) {
+	pid_t child = fork();
+	if (child == 0) {
+		setsid();
+		execl("/bin/sh", "sh", "-c", start ?
+			"exec systemctl --user start ztos-waydroid-boot.service" :
+			"sudo -n /usr/local/libexec/ztos-waydroid-recover unfreeze >/dev/null 2>&1; "
+			"timeout 25 waydroid session stop; "
+			"exec systemctl --user stop ztos-waydroid-session.service", (char *)NULL);
+		_exit(127);
+	}
+	snprintf(task_note, sizeof(task_note), start ? "Android is starting" : "Android is shutting down");
 }
 
 static double draw_tasks(cairo_t *cr) {
@@ -1019,7 +1048,10 @@ static double draw_tasks(cairo_t *cr) {
 		cairo_set_source_rgb(cr, 1, 1, 1);
 		y += zmc_text(cr, task_note, FONT_REGULAR, 13.5, ZMC_MARGIN, y, 0) + 6;
 	}
-	y += 8;
+	y += 6;
+	bool android = android_running();
+	y = zmc_button(cr, ZMC_MARGIN, y, zmc.width - 2 * ZMC_MARGIN,
+		android ? "shut down Android" : "start Android", ACT_ANDROID, android) + 8;
 	double tw = zmc.width - 2 * ZMC_MARGIN;
 	for (int k = 0; k < N_KINDS; k++) {
 		int count = 0;
@@ -1073,6 +1105,17 @@ static double draw_tasks(cairo_t *cr) {
 	} else {
 		task_asked = 0;	/* gone in the meantime */
 	}
+	if (android_asked && android) {
+		long kb = 0;
+		for (int i = 0; i < n_tasks; i++) {
+			if (tasks[i].android) kb += tasks[i].rss_kb;
+		}
+		snprintf(line, sizeof(line), "Waydroid · about %ld MB", (kb + 512) / 1024);
+		warn_box(cr, "shut down Android?", line,
+			"Every Android app closes, and anything not saved in one is lost; Android's memory is "
+			"freed. Android starts again when you open an Android app, or with start Android here.",
+			"shut down", ACT_ANDROID_STOP, 0);
+	}
 	return y + 20;
 }
 
@@ -1092,6 +1135,16 @@ static void task_action(int action, int arg) {
 		task_note[0] = 0;
 	} else if (action == ACT_TASK_CANCEL) {
 		task_asked = 0;
+		android_asked = false;
+	} else if (action == ACT_ANDROID) {
+		if (arg) {
+			android_asked = true;	/* running: shutting it down asks first */
+		} else {
+			android_power(true);
+		}
+	} else if (action == ACT_ANDROID_STOP) {
+		android_asked = false;
+		android_power(false);
 	} else if (action == ACT_TASK_END) {
 		task_asked = 0;
 		/* still running, and still the user's to end: looked at again now */
@@ -1120,7 +1173,7 @@ static double render(cairo_t *cr, int page) {
 }
 
 static void activate(int action, int arg) {
-	if (action >= ACT_TASK && action <= ACT_TASK_CANCEL) {
+	if (action >= ACT_TASK && action <= ACT_ANDROID_STOP) {
 		task_action(action, arg);
 		return;
 	}
@@ -1160,6 +1213,7 @@ static void arrived(int page) {
 		break;
 	case PAGE_TASKS:
 		task_asked = 0;
+		android_asked = false;
 		task_note[0] = 0;
 		tasks_scan();
 		zmc_every(2000, tasks_tick);	/* only while this page is open */
@@ -1177,8 +1231,9 @@ static bool back(void) {
 	if (zmc.page == PAGE_HUB || zmc.page == PAGE_LOGS) {
 		return false;	/* either tab of the hub: back leaves the app */
 	}
-	if (zmc.page == PAGE_TASKS && task_asked) {
+	if (zmc.page == PAGE_TASKS && (task_asked || android_asked)) {
 		task_asked = 0;	/* back closes the warning box first */
+		android_asked = false;
 		zmc_redraw();
 		return true;
 	}
@@ -1210,6 +1265,7 @@ int main(int argc, char **argv) {
 					/* ZT_TASKS_OPEN=1: every kind open; ZT_TASKS_ASK=PID: its warning box */
 					for (int k = 0; getenv("ZT_TASKS_OPEN") && k < N_KINDS; k++) kind_open[k] = true;
 					task_asked = getenv("ZT_TASKS_ASK") ? atoi(getenv("ZT_TASKS_ASK")) : 0;
+					android_asked = getenv("ZT_TASKS_ANDROID") != NULL;
 					tasks_scan();
 				}
 				return zmc_render_png(&devtest, i, i == PAGE_ANIM ? 1400 : 664, argv[3]);
