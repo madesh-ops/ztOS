@@ -132,6 +132,35 @@ SYSTEMUI_LIMIT_KB = 350 * 1024
 systemui_checked = [0.0]
 
 
+# Android's own bars are not drawn (ztMETRO has its status bar and nav bar),
+# yet apps that size themselves by Android's bar heights kept room for them:
+# Instagram's tab bar sat 48 dp above the bottom, its header 24 dp low.
+# qemu.hw.mainkeys (waydroid.cfg) takes the navigation bar away; these
+# overlays make the heights apps read from Android's resources 0.
+BAR_HEIGHTS = ('navigation_bar_height', 'status_bar_height', 'status_bar_height_portrait',
+               'status_bar_height_landscape')
+
+
+def bar_heights(attach):
+    """Android's bar heights 0, as fabricated overlays (kept in Android's data)."""
+    listed = run([*attach[:-1], attach[-1] + 'cmd', 'overlay', 'list', 'android'])
+    if listed.returncode:
+        raise RuntimeError(listed.stderr.strip())
+    for name in BAR_HEIGHTS:
+        overlay = f'com.android.shell:ztos_{name}'
+        if f'[x] {overlay}' in listed.stdout:
+            continue
+        if overlay not in listed.stdout:
+            # a dimension of 0 dp: TYPE_DIMENSION, value 0, unit dip
+            result = run([*attach[:-1], attach[-1] + 'cmd', 'overlay', 'fabricate', '--target', 'android',
+                          '--name', f'ztos_{name}', f'android:dimen/{name}', '0x05', '0x00000001'])
+            if result.returncode:
+                raise RuntimeError(result.stderr.strip())
+        result = run([*attach[:-1], attach[-1] + 'cmd', 'overlay', 'enable', '--user', '0', overlay])
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip())
+
+
 def systemui_guard():
     now = time.monotonic()
     if now - systemui_checked[0] < 60:
@@ -374,6 +403,7 @@ def maintain():
                 if result.returncode:
                     raise RuntimeError(result.stderr.strip())
                 background_policy(attach)
+                bar_heights(attach)
                 storage_user_access()
                 configured.clear()
                 configured.add(pid)
