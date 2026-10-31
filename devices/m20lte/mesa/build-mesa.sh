@@ -73,7 +73,9 @@ build() {
 		ninja -C $SRC/build-arch -j4 src/gallium/targets/dri/libgallium-$ARCHVER.so
 		return
 	fi
-	rm -rf $SRC && tar -xf mesa-$VER.tar.xz
+	# -m: the files are dated now, not as in the tarball; a release made after
+	# the phone's (drifting) clock would be in the future, and meson stops then
+	rm -rf $SRC && tar -mxf mesa-$VER.tar.xz
 	cd $SRC
 	patch -p1 --forward < "$HERE/pan-bi-g71-derivatives.diff"
 	touch .patched
