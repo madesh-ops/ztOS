@@ -87,6 +87,12 @@ grep -q exynos9810_pcie_pm_ops "$SRC/drivers/pci/controller/dwc/pcie-exynos9810.
 	patch -d "$SRC" -p1 --forward --no-backup-if-mismatch < "$ROOT/kernel/s9p-pcie-pm.patch"
 grep -q exynos9810_pcie_pm_ops "$SRC/drivers/pci/controller/dwc/pcie-exynos9810.c" ||
 	{ echo "pcie-exynos9810.c has no suspend/resume PM ops after patching" >&2; exit 1; }
+# a link that fails to train after sleep is tried again, and config accesses
+# while it is down are answered as an absent device instead of hanging the SoC
+grep -q exynos9810_pcie_guard_cfg "$SRC/drivers/pci/controller/dwc/pcie-exynos9810.c" ||
+	patch -d "$SRC" -p1 --forward --no-backup-if-mismatch < "$ROOT/kernel/s9p-pcie-resume-retry.patch"
+grep -q exynos9810_pcie_guard_cfg "$SRC/drivers/pci/controller/dwc/pcie-exynos9810.c" ||
+	{ echo "pcie-exynos9810.c has no resume retry after patching" >&2; exit 1; }
 python3 "$ROOT/kernel/patch-decon-wake.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-flip.py" "$SRC"
 python3 "$ROOT/kernel/patch-decon-panel-lock.py" "$SRC"

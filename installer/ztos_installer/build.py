@@ -10,6 +10,7 @@ namespace (mke2fs -d, mtools), so nothing is ever mounted for real.
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -26,7 +27,9 @@ TARBALL = ROOT / "build" / "alarm.tar.gz"
 TARBALL_URL = "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
 SDK = ROOT / "sdk"
 PKGCACHE = ROOT / "build" / "pkg-cache"
-EDK2 = Path("/usr/share/edk2/aarch64")
+# Arch's edk2-aarch64 package; the Nix development shell exports ZTOS_EDK2
+# with the same QEMU_EFI.fd from nixpkgs.
+EDK2 = Path(os.environ.get("ZTOS_EDK2", "/usr/share/edk2/aarch64"))
 PHONES = ("starlte", "m20lte")      # the targets that are a phone (zboot boot image, ZR_ARCH root)
 
 
@@ -85,7 +88,9 @@ def check_host():
             missing.append(tool)
     if not Path("/usr/bin/mke2fs").exists() and not Path("/usr/sbin/mke2fs").exists():
         missing.append("mke2fs (e2fsprogs)")
-    if not Path("/proc/sys/fs/binfmt_misc/qemu-aarch64").exists():
+    if platform.machine() not in ("aarch64", "arm64") and not Path(
+        "/proc/sys/fs/binfmt_misc/qemu-aarch64"
+    ).exists():
         missing.append("qemu-user-static + qemu-user-static-binfmt (to run aarch64 programs)")
     user = os.environ.get("USER", "")
     subuid = Path("/etc/subuid").read_text() if Path("/etc/subuid").exists() else ""
@@ -147,10 +152,14 @@ step() { echo "STEP $*"; }
 R=$ROOTFS
 umask 022
 
-if [ "$FRESH" = 1 ] || [ ! -e "$R/etc/arch-release" ]; then
+# A run stopped half way through the unpack leaves etc/arch-release without
+# the rest (no var/lib/pacman): only a mark written after the whole tarball
+# counts as unpacked.
+if [ "$FRESH" = 1 ] || [ ! -e "$R/.ztos-unpacked" ]; then
 	step "unpacking Arch Linux ARM"
 	rm -rf "$R"; mkdir -p "$R"
 	bsdtar -xpf "$TARBALL" -C "$R" --no-xattrs --no-acls --no-fflags
+	touch "$R/.ztos-unpacked"
 fi
 
 mount --bind "$R" "$R"
@@ -306,8 +315,10 @@ echo LANG=en_US.UTF-8 > "$R/etc/locale.conf"
 step "turning on ztOS's services"
 # (systemd-resolved: names; NetworkManager hands it each network's DNS)
 # (systemd-pstore: the kernel log of a crash or hang is kept in /var/lib/systemd/pstore)
+# (zrnperfd: the CPU and GPU clocks from ztOSIAL's Perf1; without it the
+# GPU rests at its lowest step and ztMETRO lags)
 for u in greetd NetworkManager systemd-resolved sshd systemd-pstore ztos-pstore-keep ztoscoresensorframework ztos-update-check.timer \
-		ztos-iald waydroid-container ztos-waydroid-images; do
+		ztos-iald zrnperfd waydroid-container ztos-waydroid-images; do
 	ch systemctl enable "$u" > /dev/null 2>&1
 done
 for u in systemd-networkd getty@tty1; do
