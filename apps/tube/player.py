@@ -303,6 +303,10 @@ class VideoSurface(QOpenGLWindow):
         super().__init__(QOpenGLWindow.NoPartialUpdate)
         fmt = QSurfaceFormat.defaultFormat()
         fmt.setSwapInterval(1)
+        # Qt's GL painter strokes through the stencil buffer while the
+        # controls fade (opacity under 1, so that a stroke's overlaps are
+        # not blended twice): without one, the ring was a white square
+        fmt.setStencilBufferSize(8)
         self.setFormat(fmt)
         self.player = player
         self.ctx = None
