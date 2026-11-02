@@ -492,10 +492,12 @@ class VideoPage(ztos.Page):
         items.append(("copy link", lambda: QGuiApplication.clipboard().setText(url)))
         items.append(("open in the browser", lambda: webbrowser.open(url)))
         if self._mine():
-            items.append(("stop", self._stop))
+            items.append(("stop", self._stop_video))
         ztos.menu(self.b_more, items)
 
-    def _stop(self):
+    def _stop_video(self):
+        # (not _stop: that is the SDK's, which stops the list coasting, on
+        # every finger down; named so, it stopped the video at each scroll)
         self.p.stop()
         self.poster.show()
         self.poster.set_waiting(False)
