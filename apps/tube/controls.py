@@ -35,6 +35,7 @@ G_FULL, G_WINDOW = "", ""
 G_MORE = ""
 G_BACK = ""
 G_FAST = ""
+G_PLAY, G_PAUSE, G_AGAIN = "", "", ""     # as the app bar's
 
 
 def clock(seconds: float) -> str:
@@ -393,13 +394,10 @@ class Controls(QObject):
         c, r = b["play"]
         if not (self.buffering and not self.p.is_paused):
             self._ring(p, c, r, "play")
-            p.save()
-            p.translate(c)
-            p.setPen(QPen(white, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.setBrush(Qt.NoBrush)
-            name = "refresh" if self._ended() else "play" if self.p.is_paused else "pause"
-            ztos._glyph(p, name, r * 0.75)
-            p.restore()
+            # (the font's glyphs, as the app bar under the picture has them: the
+            # SDK's drawn ones are outlines, and its pause read as two boxes)
+            glyph = G_AGAIN if self._ended() else G_PLAY if self.p.is_paused else G_PAUSE
+            self._glyph(p, c, glyph, r * 0.7)
         # the top: "..." (and full screen, back and the title)
         c, _ = b["more"]
         if self.pressed == "more":
