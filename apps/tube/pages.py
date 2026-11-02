@@ -4,8 +4,8 @@ import re
 import webbrowser
 from typing import Optional
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath
+from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QTimer
+from PySide6.QtGui import QColor, QFontMetricsF, QGuiApplication, QImage, QPainter, QPainterPath
 from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 import library
@@ -165,8 +165,13 @@ class VideoPage(ztos.Page):
         self.p = playback.get()
         self.live = bool(video.get("live"))
         self._landscape = False
+        self._left_full = False     # turned, but the full screen was left (its button)
+        self.picker: Optional["PlayerPicker"] = None     # quality and speed, while it is up
+        playback.video_widget()     # made now: its GL context is ready before play
+        self.controls = playback.surface.controls
 
-        # the top: picture and seek bar, outside the scrolling list
+        # the top: the picture, outside the scrolling list (its controls,
+        # the progress bar among them, are drawn on it: controls.py)
         self.top = QWidget()
         top = QVBoxLayout(self.top)
         top.setContentsMargins(0, 0, 0, 0)
@@ -177,13 +182,6 @@ class VideoPage(ztos.Page):
         self.poster = Poster(video, self._play_tapped)
         self.slot_layout.addWidget(self.poster)
         top.addWidget(self.slot)
-        self.seek = ztos.SeekBar(0, video.get("duration") or 0, on_seek=lambda s: self.p.seek(s))
-        seek_box = QWidget()
-        sl = QVBoxLayout(seek_box)
-        sl.setContentsMargins(ztos.MARGIN, 4, ztos.MARGIN, 0)
-        sl.addWidget(self.seek)
-        self.seek_box = seek_box
-        top.addWidget(seek_box)
         self.layout().insertWidget(1, self.top)
 
         # the list
@@ -207,13 +205,13 @@ class VideoPage(ztos.Page):
         self.bar(self.b_play, self.b_audio, self.b_download, self.b_sub, self.b_more)
         self._show_subscribed()
 
-        self.p.position.connect(self._on_position)
         self.p.paused.connect(self._on_paused)
         self.p.changed.connect(self._on_changed)
         self.p.failed.connect(self._on_failed)
         self.p.mode.connect(self._on_mode)
-        playback.video_widget()     # made now: its GL context is ready before play
-        playback.surface.tapped.connect(self._video_tapped)
+        self.controls.title = video.get("title") or ""
+        self.controls.full_screen.connect(self._full_tapped)
+        self.controls.settings.connect(self._settings)
 
         self._attach_pending = False
         if self._mine():
@@ -247,6 +245,8 @@ class VideoPage(ztos.Page):
         if info.get("live"):
             title = re.sub(r" \d{4}-\d{2}-\d{2} \d{2}:\d{2}$", "", title)     # (yt-dlp adds the hour)
         self.title_label.setText(title)
+        if self._mine() or not self.p.video:
+            self.controls.title = title
         parts = [count(info.get("views"), "views"), details(dict(info, views=None), channel=False),
                  count(info.get("likes"), "likes")]
         self.detail_label.setText(" • ".join(x for x in parts if x))
@@ -256,9 +256,7 @@ class VideoPage(ztos.Page):
             self.channel_row.name = info["channel"]
             self.channel_row.set_detail(count(info.get("subscribers"), "subscribers"))
         self.description.setText((info.get("description") or "").strip())
-        self.seek.set_duration(float(info.get("duration") or 0))
         self.live = bool(info.get("live"))
-        self.seek_box.setVisible(not self.live and not self._landscape)     # (a live stream has no end to seek to)
         self._show_subscribed()
         self._changed(explicit=True)
 
@@ -342,6 +340,8 @@ class VideoPage(ztos.Page):
 
     def hideEvent(self, e):
         super().hideEvent(e)
+        if QGuiApplication.applicationState() == Qt.ApplicationActive:
+            self._window_full(False)    # (another page: not on the whole screen)
         # left for another page (a channel), or the app went away: sound only
         if self._mine() and self.p.with_video:
             if library.setting("background"):
@@ -350,15 +350,22 @@ class VideoPage(ztos.Page):
                 self.p.pause()
 
     def back(self) -> bool:
+        if self.picker is not None:
+            self.picker.back()          # the picker's list first
+            return True
+        if self._is_full():
+            self._full_tapped(False)    # then the full screen
+            return True
         freeze_video()      # (before the turn back pictures this page)
         if self.request is not None:
             state.worker.forget(self.request)
             self.request = None
         if self._mine() and self.p.playing() and not library.setting("background"):
             self.p.stop()
-        for sig, slot in ((self.p.position, self._on_position), (self.p.paused, self._on_paused),
+        for sig, slot in ((self.p.paused, self._on_paused),
                           (self.p.changed, self._on_changed), (self.p.failed, self._on_failed),
-                          (self.p.mode, self._on_mode), (playback.surface.tapped, self._video_tapped)):
+                          (self.p.mode, self._on_mode), (self.controls.full_screen, self._full_tapped),
+                          (self.controls.settings, self._settings)):
             try:
                 sig.disconnect(slot)
             except (RuntimeError, TypeError):
@@ -383,13 +390,18 @@ class VideoPage(ztos.Page):
 
     def _place_top(self):
         """Upright: the picture is 16:9 across the top. On its side: the whole
-        window is the picture."""
+        window is the picture, and the window the whole screen (the shell
+        takes its status and nav bars away). Upright again, it gives it back."""
         landscape = self.width() > self.height()
         self._landscape = landscape
+        self.controls.full = landscape
         self.viewport.setVisible(not landscape)
         if self.app_bar:
             self.app_bar.setVisible(not landscape)
-        self.seek_box.setVisible(not landscape and not self.live)
+        if not landscape:
+            self._left_full = False
+        if self.isVisible() and landscape != self._is_full() and not (landscape and self._left_full):
+            QTimer.singleShot(0, lambda: self.isVisible() and self._window_full(self._landscape and not self._left_full))
         outer = self.layout()
         if landscape:
             self.slot.setMinimumHeight(0)
@@ -410,8 +422,28 @@ class VideoPage(ztos.Page):
         else:
             self.play_when_ready = True
 
-    def _video_tapped(self):
-        pass
+    # -- the whole screen ------------------------------------------------------------------------------
+    @staticmethod
+    def _is_full() -> bool:
+        return bool(state.app.window.windowState() & Qt.WindowFullScreen)
+
+    @staticmethod
+    def _window_full(on: bool):
+        w = state.app.window
+        st = w.windowState()
+        if bool(st & Qt.WindowFullScreen) != on:
+            w.setWindowState(st | Qt.WindowFullScreen if on else st & ~Qt.WindowFullScreen)
+
+    def _full_tapped(self, on: bool):
+        """The full-screen button, or a swipe. Asked for upright, the shell
+        turns the app on its side; left on its side, it turns it upright,
+        each until the phone is turned."""
+        self._left_full = not on
+        self._window_full(on)
+
+    def _settings(self):
+        if self._mine() and self.picker is None:
+            self.picker = PlayerPicker(self)
 
     def _toggle_audio(self):
         ztos.haptic("tap")
@@ -471,12 +503,6 @@ class VideoPage(ztos.Page):
             playback.container.hide()
 
     # -- the player's news -------------------------------------------------------------------------
-    def _on_position(self, pos: float, dur: float):
-        if self._mine() and self.isVisible():
-            self.seek.set_position(pos)
-            if dur:
-                self.seek.set_duration(dur)
-
     def _on_paused(self, paused: bool):
         if self._mine():
             self.b_play.set_glyph(G_PLAY if paused else G_PAUSE)
@@ -499,6 +525,155 @@ class VideoPage(ztos.Page):
         self.b_audio.set_label("picture" if self.audio_only else "sound only")
         if self._mine() and self.isVisible():
             self._attach()
+
+
+SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
+
+
+def _speed_name(speed: float) -> str:
+    return "Normal" if abs(speed - 1.0) < 0.01 else f"{speed:g}x"
+
+
+class PlayerPicker(QWidget):
+    """"..." on the player: quality and playback speed, as Windows Phone's
+    list pickers are. The whole window: the app's name in capitals, the
+    setting in large lowercase, its value under it in the accent; tapped, the
+    choices in a list of their own, the chosen one in the accent. The picture
+    stands still under it (freeze_video); back closes it a level at a time."""
+    ROW_MAIN = 72
+    ROW = 56
+
+    def __init__(self, page: "VideoPage"):
+        host = state.app.window
+        super().__init__(host)
+        self.page = page
+        self.p = page.p
+        self.level = "main"
+        freeze_video()
+        self.setGeometry(host.rect())
+        self._t = 0.0
+        self._closing = False
+        self._timer = QTimer(self, interval=16)
+        self._timer.timeout.connect(self._step)
+        self._timer.start()
+        ztos.haptic("tap")
+        self.show()
+        self.raise_()
+
+    def _speed(self) -> float:
+        try:
+            return float(self.p.mpv.speed or 1.0)
+        except Exception:
+            return 1.0
+
+    def _rows(self) -> list:
+        """(key, text, value or chosen)"""
+        if self.level == "main":
+            h = self.p.height
+            return [("quality", "quality", f"{h}p" if h else "automatic"),
+                    ("speed", "playback speed", _speed_name(self._speed()).lower())]
+        if self.level == "quality":
+            return [(h, f"{h}p", h == self.p.height) for h in reversed(self.p.heights())]
+        return [(v, _speed_name(v).lower(), abs(v - self._speed()) < 0.01) for v in SPEEDS]
+
+    def _header(self) -> str:
+        return {"main": "TUBE", "quality": "CHOOSE QUALITY", "speed": "CHOOSE PLAYBACK SPEED"}[self.level]
+
+    def _top(self) -> float:
+        return 20.0 if self.width() > self.height() else 28.0
+
+    def _row_h(self) -> float:
+        return self.ROW_MAIN if self.level == "main" else self.ROW
+
+    def _per_column(self) -> int:
+        """Rows a column holds: on its side the list goes on in a second
+        column (and a third) instead of off the screen"""
+        room = self.height() - self._top() - 44 - 8
+        return max(1, int(room // self._row_h()))
+
+    def _place(self, i: int) -> QPointF:
+        n = self._per_column()
+        cols = -(-len(self._rows()) // n)
+        col_w = (self.width() - ztos.MARGIN - 8) / max(1, cols) if cols > 1 else self.width()
+        return QPointF(ztos.MARGIN + 8 + (i // n) * col_w, self._top() + 44 + (i % n) * self._row_h())
+
+    def _step(self):
+        # in as Windows Phone's pages come: up a little, from nothing
+        self._t = max(0.0, self._t - 0.14) if self._closing else min(1.0, self._t + 0.14)
+        self.update()
+        if self._t in (0.0, 1.0):
+            self._timer.stop()
+            if self._closing:
+                self.page.picker = None
+                self.deleteLater()
+                if self.page.isVisible():
+                    self.page._attach()     # the picture back in its place
+
+    def close_picker(self):
+        if not self._closing:
+            self._closing = True
+            self._timer.start()
+
+    def back(self):
+        if self.level != "main":
+            self.level = "main"
+            self.update()
+        else:
+            self.close_picker()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        ease = 1 - (1 - self._t) ** 3
+        p.fillRect(self.rect(), QColor(0, 0, 0, int(255 * min(1.0, ease * 1.2))))
+        p.setOpacity(ease)
+        p.translate(0, 40 * (1 - ease))
+        x = float(ztos.MARGIN + 8)
+        y = self._top()
+        p.setPen(QColor("white"))
+        p.setFont(ztos._font(ztos.FONT_SEMIBOLD, 13))
+        fm = QFontMetricsF(p.font())
+        p.drawText(QPointF(x, y + fm.ascent()), self._header())
+        for i, (_key, text, value) in enumerate(self._rows()):
+            at = self._place(i)
+            x, y = at.x(), at.y()
+            if self.level == "main":
+                p.setPen(QColor("white"))
+                p.setFont(ztos._font(ztos.FONT_SEMILIGHT, 26))
+                fm = QFontMetricsF(p.font())
+                p.drawText(QPointF(x, y + fm.ascent()), text)
+                p.setPen(ztos.accent())
+                p.setFont(ztos._font(ztos.FONT_REGULAR, 14))
+                fm2 = QFontMetricsF(p.font())
+                p.drawText(QPointF(x, y + fm.height() + fm2.ascent()), value)
+            else:
+                p.setPen(ztos.accent() if value else QColor("white"))
+                p.setFont(ztos._font(ztos.FONT_LIGHT, 30))
+                fm = QFontMetricsF(p.font())
+                p.drawText(QPointF(x, y + fm.ascent()), text)
+
+    def mousePressEvent(self, e):
+        pass
+
+    def mouseReleaseEvent(self, e):
+        rows = self._rows()
+        pos = e.position()
+        # (the last first: a row's box runs on under the columns to its right)
+        i = next((i for i in reversed(range(len(rows))) if QRectF(self._place(i), QSizeF(
+            self.width(), self._row_h())).contains(pos)), -1)
+        if i < 0:
+            return
+        key = rows[i][0]
+        ztos.haptic("tap")
+        if self.level == "main":
+            self.level = key
+            self.update()
+            return
+        if self.level == "quality":
+            self.p.set_height(key)
+        else:
+            self.p.mpv.speed = key
+        self.close_picker()
 
 
 class ChannelPage(ztos.Page):

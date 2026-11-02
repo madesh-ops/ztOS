@@ -20,11 +20,12 @@ import time
 from typing import Optional
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QSurfaceFormat
+from PySide6.QtGui import QPainter, QSurfaceFormat
 from PySide6.QtOpenGL import QOpenGLWindow
 from PySide6.QtWidgets import QWidget
 
 import library
+from controls import Controls
 
 locale.setlocale(locale.LC_NUMERIC, "C")    # libmpv refuses to start otherwise
 import mpv  # noqa: E402
@@ -78,12 +79,14 @@ class Player(QObject):
         self._loading = False
         self._loaded_video = False      # the file loaded has a picture to turn on and off
         self.last_frame = None          # the picture as it was last, for a page's turn (pages.py)
+        self.cached = 0.0               # how far the stream is read ahead to (seconds into it)
         self.surface: Optional["VideoSurface"] = None
         self.mpv.observe_property("time-pos", self._on_time)
         self.mpv.observe_property("duration", self._on_duration)
         self.mpv.observe_property("pause", lambda _n, v: self._emit_pause(bool(v)))
         self.mpv.observe_property("paused-for-cache", lambda _n, v: self.buffering.emit(bool(v)))
         self.mpv.observe_property("eof-reached", self._on_eof)
+        self.mpv.observe_property("demuxer-cache-time", self._on_cached)
         self.mpv.register_event_callback(self._on_event)
         self.position.connect(self._maybe_save)     # (queued: this runs on the app's thread)
 
@@ -110,6 +113,9 @@ class Player(QObject):
     def _emit_pause(self, paused: bool):
         self.is_paused = paused
         self.paused.emit(paused)
+
+    def _on_cached(self, _name, value):
+        self.cached = float(value or 0.0)
 
     def _on_eof(self, _name, value):
         if value:
@@ -289,9 +295,8 @@ class Player(QObject):
 
 
 class VideoSurface(QOpenGLWindow):
-    """Where mpv draws. Taps: one toggles pause, two on either side jump ten
-    seconds; a drag across seeks."""
-    tapped = Signal()
+    """Where mpv draws, and the controls over it (controls.py), which have its
+    touches."""
 
     def __init__(self, player: Player):
         super().__init__(QOpenGLWindow.NoPartialUpdate)
@@ -300,12 +305,9 @@ class VideoSurface(QOpenGLWindow):
         self.setFormat(fmt)
         self.player = player
         self.ctx = None
+        self.controls = Controls(player)
+        self.controls.changed.connect(self._controls_changed)
         player._frame.connect(self._new_frame, Qt.QueuedConnection)
-        self._down = None
-        self._last_tap = 0.0
-        self._tap_timer = QTimer(self, singleShot=True, interval=280)
-        self._tap_timer.timeout.connect(self._single_tap)
-        self._seek_from = 0.0
 
     def initializeGL(self):
         self.ctx = mpv.MpvRenderContext(self.player.mpv, "opengl",
@@ -337,51 +339,30 @@ class VideoSurface(QOpenGLWindow):
             except Exception:
                 pass
 
+    def _controls_changed(self):
+        if self.isExposed():
+            self.update()       # (one with the next frame's, playing: Qt draws once for both)
+
     def paintGL(self):
         if self.ctx is None:
             return
         r = self.devicePixelRatio()
         self.ctx.render(flip_y=True, opengl_fbo={"w": int(self.width() * r), "h": int(self.height() * r),
                                                  "fbo": self.defaultFramebufferObject()})
+        if self.player.video:
+            p = QPainter(self)
+            self.controls.paint(p, self.width(), self.height())
+            p.end()
 
     # touch arrives as mouse events on Wayland's touch emulation
     def mousePressEvent(self, e):
-        self._down = e.position()
-        self._seek_from = self.player.pos
+        self.controls.press(e.position(), self.width(), self.height())
 
     def mouseMoveEvent(self, e):
-        if self._down is None:
-            return
-        dx = e.position().x() - self._down.x()
-        if abs(dx) > 24:
-            # the width of the picture is 90 seconds
-            target = max(0.0, self._seek_from + dx / max(1, self.width()) * 90)
-            self.player.seek(target)
-            self.player.osd()
+        self.controls.move(e.position())
 
     def mouseReleaseEvent(self, e):
-        if self._down is None:
-            return
-        moved = abs(e.position().x() - self._down.x()) + abs(e.position().y() - self._down.y())
-        x = e.position().x()
-        self._down = None
-        if moved > 24:
-            return
-        now = time.time()
-        if now - self._last_tap < 0.28:
-            self._tap_timer.stop()
-            self._last_tap = 0.0
-            step = -10 if x < self.width() / 2 else 10
-            self.player.seek(step, relative=True)
-            self.player.osd(f"{'-' if step < 0 else '+'}10 s")
-            return
-        self._last_tap = now
-        self._tap_timer.start()
-
-    def _single_tap(self):
-        self.player.toggle()
-        self.player.osd()
-        self.tapped.emit()
+        self.controls.release(e.position())
 
 
 player: Optional[Player] = None

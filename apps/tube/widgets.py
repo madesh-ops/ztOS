@@ -159,10 +159,10 @@ def draw_cover(p: QPainter, image: Optional[QImage], rect: QRectF, round_: bool 
     if image is None:
         p.fillRect(rect, QColor(0x26, 0x26, 0x26))
     else:
-        # (in the picture's own points: drawImage reads the source rect so, and
-        # a frame grabbed from the video's surface is three pixels a point)
-        r = image.devicePixelRatio() or 1.0
-        iw, ih = image.width() / r, image.height() / r
+        # (in the picture's own pixels, as drawImage reads the source rect: a
+        # frame grabbed from the video's surface is three pixels a point, and
+        # taken as points it was drawn three times too big)
+        iw, ih = image.width(), image.height()
         src_ratio = iw / max(1e-6, ih)
         dst_ratio = rect.width() / rect.height()
         if src_ratio > dst_ratio:
