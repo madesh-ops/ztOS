@@ -24,6 +24,7 @@ Your files: ztos.resource("data.json") -> bytes, ztos.load_ui("form.ui")
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -2178,12 +2179,29 @@ class Pivot(QWidget):
             page.setGeometry(self._area.rect())
         page.layout().activate()
         page._fit()
-        picture = _snapshot(page, self._area.size())
+        with self._drawable():
+            picture = _snapshot(page, self._area.size())
         self._snap_at[i] = (page._version, page._scroll)
         layer = _layer_of(self)
         if layer is not None:
             layer.upload((id(self), i), picture.toImage() if hasattr(picture, "toImage") else picture)
         return picture
+
+    @contextlib.contextmanager
+    def _drawable(self):
+        """Updates on while a picture is taken: a slide turns them off for the
+        pivot and all in it (begin_drag), and Qt's render() leaves out what
+        it may not update. A slide begun over one still moving, or turn()
+        (which pictures the tabs on its way), pictured the search page
+        without its box and the app bar without its buttons."""
+        off = not self.updatesEnabled()
+        if off:
+            self.setUpdatesEnabled(True)
+        try:
+            yield
+        finally:
+            if off:
+                self.setUpdatesEnabled(False)
 
     def _current_snap(self, i: int) -> bool:
         page = self.pages[i]
@@ -2239,6 +2257,9 @@ class Pivot(QWidget):
         cw, ch = self._caps_size
         quads = [Quad.rect(("sys", "black"), whole, ox, oy, w, h),
                  Quad.rect((id(self), "caps"), whole, ox + MARGIN, oy + 14, cw, ch)]
+        bar = getattr(self, "_bar_at", None)
+        if bar is not None:
+            quads.append(Quad.rect((id(self), "bar"), whole, ox + bar.x(), oy + bar.y(), bar.width(), bar.height()))
         width = self._widths.__getitem__
         a, b = self._title_pos(k0, width), self._title_pos(k0 + 1, width)
         strip = a + (u - k0) * (b - a)
@@ -2278,6 +2299,15 @@ class Pivot(QWidget):
         layer = _layer_of(self)
         if layer is not None:
             self._prepare_titles()  # the titles' pictures, made before the first frame
+            # The app bar too, on the layer: under it the window stands still,
+            # and the buffer it commits with each frame (see _gl._Surface._next)
+            # did not always hold the bar, which went black for the slide
+            bar = getattr(self, "app_bar", None)
+            self._bar_at = None
+            if bar is not None and bar.isVisible():
+                with self._drawable():
+                    layer.upload((id(self), "bar"), bar.grab().toImage())
+                self._bar_at = QRectF(bar.geometry())
             at = self.mapTo(self.window(), QPoint(0, 0))
             self._gl_ox, self._gl_oy = float(at.x()), float(at.y())
             _solid(layer, ("sys", "black"), QColor(0, 0, 0))
