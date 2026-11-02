@@ -394,7 +394,7 @@ class VideoPage(ztos.Page):
         takes its status and nav bars away). Upright again, it gives it back."""
         landscape = self.width() > self.height()
         self._landscape = landscape
-        self.controls.full = landscape
+        self.controls.set_full(landscape)
         self.viewport.setVisible(not landscape)
         if self.app_bar:
             self.app_bar.setVisible(not landscape)

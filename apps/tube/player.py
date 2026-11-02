@@ -14,12 +14,13 @@ running, so this is background play.
 """
 import ctypes
 import locale
+import math
 import os
 import sys
 import time
 from typing import Optional
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QPainter, QSurfaceFormat
 from PySide6.QtOpenGL import QOpenGLWindow
 from PySide6.QtWidgets import QWidget
@@ -308,6 +309,7 @@ class VideoSurface(QOpenGLWindow):
         self.controls = Controls(player)
         self.controls.changed.connect(self._controls_changed)
         player._frame.connect(self._new_frame, Qt.QueuedConnection)
+        self._pinch: Optional[float] = None     # two fingers down: how far apart they started
 
     def initializeGL(self):
         self.ctx = mpv.MpvRenderContext(self.player.mpv, "opengl",
@@ -354,7 +356,30 @@ class VideoSurface(QOpenGLWindow):
             self.controls.paint(p, self.width(), self.height())
             p.end()
 
-    # touch arrives as mouse events on Wayland's touch emulation
+    def event(self, e):
+        """Two fingers: a pinch, spread to fill the screen with the picture
+        and together to fit it. One finger is left to Qt, which makes mouse
+        events of it (below)."""
+        if e.type() in (QEvent.TouchBegin, QEvent.TouchUpdate, QEvent.TouchEnd, QEvent.TouchCancel):
+            down = [pt for pt in e.points() if pt.state() != pt.State.Released]
+            if len(down) >= 2 or self._pinch is not None:
+                if len(down) >= 2:
+                    a, b = down[0].position(), down[1].position()
+                    apart = math.hypot(a.x() - b.x(), a.y() - b.y())
+                    if self._pinch is None:
+                        self._pinch = max(1.0, apart)
+                        self.controls.cancel()
+                    elif apart / self._pinch > 1.15:
+                        self.controls.zoom(True)
+                    elif apart / self._pinch < 0.87:
+                        self.controls.zoom(False)
+                if e.type() in (QEvent.TouchEnd, QEvent.TouchCancel):
+                    self._pinch = None
+                e.accept()
+                return True
+        return super().event(e)
+
+    # one finger arrives as mouse events (Qt's, from the touch)
     def mousePressEvent(self, e):
         self.controls.press(e.position(), self.width(), self.height())
 

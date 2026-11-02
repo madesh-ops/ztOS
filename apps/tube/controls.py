@@ -9,7 +9,9 @@ in a ring in the middle, the slider with the time under it, the full-screen
 glyph, "..." for quality and speed) and another tap hides them; playing, they
 go by themselves after 3 s. Two taps on either side jump ten seconds, more
 taps further. Holding plays at twice the speed. The slider is dragged to
-seek. Up in a swipe goes full screen, down leaves it.
+seek. Up in a swipe goes full screen, down leaves it. Full screen, two
+fingers spread fill the screen with the picture (its edges cut off), and
+pinched together fit it again.
 
 They look as Windows Phone 8.1's do: flat, square, Segoe, the accent colour
 from Settings, the SDK's round buttons, its five-dot progress ring.
@@ -49,7 +51,10 @@ class Controls(QObject):
     def __init__(self, player):
         super().__init__()
         self.p = player
-        self.full = False           # the page has the whole screen
+        self.full = False           # the page has the whole screen (set_full)
+        self.zoomed = False         # full screen, the picture fills it (cut to its shape)
+        self.note = ""              # a word on a band of the accent for a moment ("ZOOMED TO FILL")
+        self.note_at = 0.0
         self.title = ""
         self.shown = False
         self.alpha = 0.0            # how far the controls have faded in
@@ -79,10 +84,54 @@ class Controls(QObject):
         self._fade_at = 0.0
         self._ripple = QTimer(self, interval=33)
         self._ripple.timeout.connect(self._ripple_step)
+        self._note = QTimer(self, singleShot=True, interval=1200)
+        self._note.timeout.connect(self._note_gone)
         player.paused.connect(self._on_paused)
         player.buffering.connect(self._on_buffering)
         player.ended.connect(self._on_ended)
         player.position.connect(lambda *_: self.shown and self.changed.emit())
+
+    # -- the whole screen, and the picture filling it -------------------------------------------
+    def set_full(self, full: bool):
+        if full != self.full:
+            self.full = full
+            if not full and self.zoomed:
+                self.zoom(False, say=False)     # (upright, the picture fits its slot again)
+
+    def zoom(self, on: bool, say: bool = True):
+        """Fill the screen (mpv's panscan: the picture as large as it takes
+        to leave no bars, its edges cut off) or fit it"""
+        if on and not self.full:
+            return
+        if on != self.zoomed:
+            self.zoomed = on
+            try:
+                self.p.mpv["panscan"] = 1.0 if on else 0.0
+            except Exception:
+                pass
+            if say:
+                ztos.haptic("tick")
+                self.note, self.note_at = "ZOOMED TO FILL" if on else "ORIGINAL", time.monotonic()
+                self._note.start()
+            self.changed.emit()
+
+    def _note_gone(self):
+        self.note = ""
+        self.changed.emit()
+
+    def cancel(self):
+        """A second finger: what the first one started is not a tap, a hold
+        or a drag (a pinch, see player.VideoSurface)"""
+        self._down = None
+        self._on_bar = False
+        self.scrub = None
+        self.pressed = ""
+        self._hold.stop()
+        self._tap.stop()
+        if self.fast:
+            self.fast = False
+            self.p.mpv.speed = self._speed_before
+        self.changed.emit()
 
     # -- showing and hiding ---------------------------------------------------------------------
     def show(self, keep: bool = False):
@@ -316,7 +365,9 @@ class Controls(QObject):
         if self.ripple_side:
             self._paint_jump(p, w, h)
         if self.fast:
-            self._paint_fast(p, w)
+            self._paint_band(p, w, "2x SPEED", G_FAST)
+        elif self.note:
+            self._paint_band(p, w, self.note, "")
         if self.buffering and not self.p.is_paused:
             self._paint_ring(p, QPointF(w / 2, h / 2), 20 if not self.full else 26)
 
@@ -432,17 +483,19 @@ class Controls(QObject):
         p.drawText(QPointF(band.center().x() - fm2.horizontalAdvance("SECONDS") / 2, cy + 26), "SECONDS")
         p.setOpacity(1.0)
 
-    def _paint_fast(self, p: QPainter, w: float):
-        """Held: twice the speed, on a flat band of the accent"""
+    def _paint_band(self, p: QPainter, w: float, text: str, glyph: str):
+        """A word at the top on a flat band of the accent: "2x SPEED" while
+        held, "ZOOMED TO FILL" for a moment"""
         p.setFont(ztos._font(ztos.FONT_SEMIBOLD, 12))
         fm = QFontMetricsF(p.font())
-        text = "2x SPEED"
-        r = QRectF((w - fm.horizontalAdvance(text) - 44) / 2, 12, fm.horizontalAdvance(text) + 44, 26)
+        extra = 44 if glyph else 24
+        r = QRectF((w - fm.horizontalAdvance(text) - extra) / 2, 12, fm.horizontalAdvance(text) + extra, 26)
         p.fillRect(r, ztos.accent())
         p.setPen(QColor("white"))
         p.drawText(r.adjusted(12, 0, 0, 0), Qt.AlignLeft | Qt.AlignVCenter, text)
-        p.setFont(ztos._font(ztos.FONT_SYMBOLIC, 11))
-        p.drawText(r.adjusted(0, 0, -12, 0), Qt.AlignRight | Qt.AlignVCenter, G_FAST)
+        if glyph:
+            p.setFont(ztos._font(ztos.FONT_SYMBOLIC, 11))
+            p.drawText(r.adjusted(0, 0, -12, 0), Qt.AlignRight | Qt.AlignVCenter, glyph)
 
     def _paint_ring(self, p: QPainter, c: QPointF, r: float):
         """Windows Phone's progress ring: five dots chasing round, each
