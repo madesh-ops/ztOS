@@ -372,7 +372,9 @@ struct zt_toplevel {
 	bool awaiting;
 	uint32_t awaiting_since;
 	int sent_w, sent_h;	/* the size it was last asked to take */
-	struct wl_listener map, unmap, commit, destroy;
+	bool full_wanted;	/* it asked for the whole screen (a video) */
+	bool sent_full;		/* it was last told it has it */
+	struct wl_listener map, unmap, commit, destroy, request_fullscreen;
 };
 
 struct zt_popup {
@@ -762,6 +764,12 @@ struct zt_server {
 	int rot;		/* how the app area is turned: 0 upright, 1 for the phone
 				 * held with its left side down, 3 with its right side down */
 	bool can_turn;		/* an accelerometer says which way up the phone is */
+	/* An app's own full-screen button turns it however the phone is held
+	 * (force_rot), until the phone is turned away from how it was then
+	 * (force_held; -1: the first reading after) */
+	bool forced;
+	int force_rot, force_held;
+	struct zt_toplevel *force_app;
 	bool shade_airplane;
 	bool shade_location;
 	bool shade_notifs_cleared;
@@ -7753,11 +7761,28 @@ static void draw_osk(struct zt_server *server) {
 
 /* ---- which app is in front, and how much room it gets -------------------- */
 
+/* An app that asked for the whole screen has it while it is on its side:
+ * no status bar, no nav bar. Turned upright again it has them back, so that
+ * one that never lets go is left by turning the phone. */
+static bool app_full(struct zt_server *server) {
+	return server->shown && server->shown->full_wanted && server->rot != 0 &&
+		!server->locked && !server->switcher;
+}
+
+/* Where the app area starts, and how long it is (the keyboard aside) */
+static double app_top(struct zt_server *server) {
+	return app_full(server) ? 0 : STATUS_H;
+}
+
+static double app_room(struct zt_server *server) {
+	return app_full(server) ? server->height : server->height - STATUS_H - NAV_H;
+}
+
 static bool is_terminal(struct zt_toplevel *toplevel);
 static double app_height(struct zt_server *server) {
 	bool make_room = server->osk_visible && server->shown &&
 		(is_terminal(server->shown) || server->shown->android_runtime);
-	return server->height - STATUS_H - NAV_H - (make_room ? server->osk_h : 0);
+	return app_room(server) - (make_room ? server->osk_h : 0);
 }
 
 /* How far the app goes up while the keyboard is over it: enough for the box
@@ -7783,7 +7808,7 @@ static void osk_lift(struct zt_server *server) {
 /* How wide the app area is, as the app sees it: turned, it is the stretch
  * between the status row and the navigation bar. */
 static int app_width(struct zt_server *server) {
-	return server->rot ? server->height - STATUS_H - NAV_H : server->width;
+	return server->rot ? app_room(server) : server->width;
 }
 
 static double app_fit(struct zt_server *server, struct zt_toplevel *toplevel) {
@@ -7803,6 +7828,11 @@ static void app_configure(struct zt_server *server, struct zt_toplevel *toplevel
 		toplevel->sent_w = w;
 		toplevel->sent_h = h;
 		wlr_xdg_toplevel_set_size(toplevel->xdg_toplevel, w, h);
+	}
+	bool full = toplevel == server->shown && app_full(server);
+	if (full != toplevel->sent_full && toplevel->xdg_toplevel->base->initialized) {
+		toplevel->sent_full = full;
+		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, full);
 	}
 }
 
@@ -7899,7 +7929,18 @@ static void orient_apply(struct zt_server *server) {
 	}
 	int held = orient.held;
 	pthread_mutex_unlock(&orient.lock);
-	int rot = wanted && held > 0 ? held : !wanted || held == 0 ? 0 : server->rot;
+	if (server->forced && (server->shown != server->force_app || !server->shown)) {
+		server->forced = false;		/* the app it was for is not in front */
+	}
+	if (server->forced && held >= 0) {
+		if (server->force_held < 0) {
+			server->force_held = held;
+		} else if (held != server->force_held) {
+			server->forced = false;	/* turned: the phone says again */
+		}
+	}
+	int rot = server->forced ? server->force_rot :
+		wanted && held > 0 ? held : !wanted || held == 0 ? 0 : server->rot;
 	if (rot != server->rot) {
 		wlr_log(WLR_INFO, "orientation: apps %s", rot == 1 ? "turned left" : rot == 3 ? "turned right" : "upright");
 		server->rot = rot;
@@ -7908,6 +7949,38 @@ static void orient_apply(struct zt_server *server) {
 		}
 		damage(server);
 	}
+}
+
+/* An app asks for the whole screen, or gives it back. Asked while upright
+ * (a video's full-screen button), the app turns on its side; given back
+ * while on its side, it turns upright; either until the phone is turned. */
+static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
+	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, request_fullscreen);
+	struct zt_server *server = toplevel->server;
+	bool want = toplevel->xdg_toplevel->requested.fullscreen;
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		toplevel->full_wanted = want;
+		return;
+	}
+	/* (asked again after the phone was turned upright, it turns again: each
+	 * ask is a press of the button) */
+	if (toplevel == server->shown && !server->locked && (want ? server->rot == 0 : server->rot != 0)) {
+		pthread_mutex_lock(&orient.lock);
+		int held = orient.held;
+		pthread_mutex_unlock(&orient.lock);
+		server->forced = true;
+		server->force_rot = want ? 1 : 0;
+		server->force_held = held;
+		server->force_app = toplevel;
+	}
+	toplevel->full_wanted = want;
+	wlr_log(WLR_INFO, "full screen: %s %s", toplevel->xdg_toplevel->app_id ? toplevel->xdg_toplevel->app_id : "?",
+		want ? "asked for" : "given back");
+	orient_apply(server);
+	app_configure(server, toplevel);
+	/* (an answer every time, even when nothing changed) */
+	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	damage(server);
 }
 
 static int orient_changed(int fd, uint32_t mask, void *data) {
@@ -7969,7 +8042,7 @@ static void orient_init(struct zt_server *server) {
 /* A point on the screen as the app area's own: (u, v) from its top left
  * corner as the app sees it, before the app is fitted to it. */
 static void app_point(struct zt_server *server, double x, double y, double *u, double *v) {
-	double top = STATUS_H - server->app_lift, room = server->height - STATUS_H - NAV_H;
+	double top = app_top(server) - server->app_lift, room = app_room(server);
 	if (server->rot == 1) {
 		*u = y - top;
 		*v = server->width - x;
@@ -9743,7 +9816,12 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->unmap.link);
 	wl_list_remove(&toplevel->commit.link);
 	wl_list_remove(&toplevel->destroy.link);
+	wl_list_remove(&toplevel->request_fullscreen.link);
 	wl_list_remove(&toplevel->link);
+	if (server->force_app == toplevel) {
+		server->forced = false;
+		server->force_app = NULL;
+	}
 	free(toplevel);
 }
 
@@ -9763,6 +9841,8 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->base->surface->events.commit, &toplevel->commit);
 	toplevel->destroy.notify = xdg_toplevel_destroy;
 	wl_signal_add(&xdg_toplevel->events.destroy, &toplevel->destroy);
+	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
+	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
 }
 
 static void xdg_popup_commit(struct wl_listener *listener, void *data) {
@@ -12025,7 +12105,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		damage(server);
 		return;
 	}
-	if (!server->shade_open && y <= STATUS_H + 12) {
+	if (!server->shade_open && y <= STATUS_H + 12 && !app_full(server)) {
 		/* pulling it down: bring its contents up to date once, now */
 		p->role = ROLE_SHADE;
 		p->index = -1;
@@ -12047,7 +12127,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double x, double y
 		return;
 	}
 
-	if (y >= server->height - NAV_H) {
+	if (y >= server->height - NAV_H && !app_full(server)) {
 		p->role = ROLE_NAV;
 		p->index = (int)(x / (server->width / 3.0));
 		if (p->index > NAV_SEARCH) {
@@ -13709,7 +13789,7 @@ static void draw_app_surface(struct wlr_surface *surface, int sx, int sy, void *
 		t[1] = left ? 1 : -1;
 		t[4] = left ? -1 : 1;
 		t[12] = left ? (float)server->width : 0;
-		t[13] = left ? 0 : (float)(server->height - STATUS_H - NAV_H);
+		t[13] = left ? 0 : (float)app_room(server);
 		mat_mul(m, m, t);
 	}
 	mat_scale(m, (float)draw->fit * draw->scale, (float)draw->fit * draw->scale);	/* about the app area's corner */
@@ -14283,7 +14363,8 @@ static void render_frame(struct zt_server *server, bool show) {
 	frame_tint(server);
 
 	struct zt_toplevel *app = server->shown ? server->shown : server->leaving;
-	struct app_draw draw = { .server = server, .x = 0, .y = STATUS_H - server->app_lift, .scale = 1.0f,
+	struct app_draw draw = { .server = server, .x = 0,
+		.y = (app && app == server->shown ? app_top(server) : STATUS_H) - server->app_lift, .scale = 1.0f,
 		.angle = server->app_angle,
 		.alpha = fminf(1.0f, server->app_alpha * 4.0f) * turn_alpha(fabsf(server->app_angle) / TURN_OUT_DEG) };
 	struct wlr_output_layer_state plane_state = {0};
@@ -14313,7 +14394,7 @@ static void render_frame(struct zt_server *server, bool show) {
 			shade_folded = true;
 		}
 	}
-	int under_bottom = server->sensorhub_fail_screen ? output->height :
+	int under_bottom = server->sensorhub_fail_screen || app_full(server) ? output->height :
 		output->height - (int)floorf(NAV_H * server->scale);
 	/* the lock screen nearly down: only the nav bar's strip, which covers
 	 * the rest, is left. An empty scissor (height below zero) was a GL
@@ -14627,10 +14708,11 @@ static void render_frame(struct zt_server *server, bool show) {
 	boot_logo_draw(server, now);
 	bool retro_home = (retro_home_shown(server) && !lock_shown) ||
 		(retro_on(server) && server->locked);	/* it has its own status column, as its lock has */
-	if (!retro_home) {
+	bool full = app_full(server);	/* the app has the whole screen: no bars */
+	if (!retro_home && !full) {
 		layer_draw(server, &server->status_layer, 0, 0, 1.0f);
 	}
-	if (server->charging && server->plug_layer.tex && !retro_on(server)) {
+	if (server->charging && server->plug_layer.tex && !retro_on(server) && !full) {
 		float a = server->battery_full ? 1.0f : server->st_plug;
 		if (a > 0.5f) {
 			layer_draw(server, &server->plug_layer, server->plug_x, server->plug_y, 1.0f);
@@ -14734,7 +14816,7 @@ static void render_frame(struct zt_server *server, bool show) {
 		draw_nav(server);
 	}
 	/* the nav bar stays on top: the panel comes down behind it */
-	if (!server->sensorhub_fail_screen && !(retro_on(server) && server->locked)) {
+	if (!server->sensorhub_fail_screen && !(retro_on(server) && server->locked) && !app_full(server)) {
 		layer_draw(server, &server->nav_layer, 0, server->height - NAV_H, 1.0f);
 	}
 	if (server->keypop && server->osk_visible && server->keypop_layer.tex) {
