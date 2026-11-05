@@ -14242,6 +14242,18 @@ static double ftrace_clock(void) {
 	return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+/* A frame is on its way to the display: the app in it may draw the next. Only
+ * then, never for a frame drawn ahead: told at every frame drawn, an app ran
+ * at twice the panel's rate (a Superscan window committed every 9 ms), its
+ * work and the GPU's going to frames the display never showed. */
+static void frames_done(struct zt_toplevel *app) {
+	if (app && app->mapped) {
+		struct app_draw draw = {0};
+		clock_gettime(CLOCK_MONOTONIC, &draw.when);
+		wlr_xdg_surface_for_each_surface(app->xdg_toplevel->base, frame_done_surface, &draw);
+	}
+}
+
 /* The frame drawn ahead, if any, to the display; false if there was none */
 static bool commit_ahead(struct zt_server *server) {
 	struct zt_output *out = server->output;
@@ -14266,6 +14278,7 @@ static bool commit_ahead(struct zt_server *server) {
 	if (ok) {
 		out->last_submitted = buffer;
 		out->in_flight = true;
+		frames_done(server->shown ? server->shown : server->leaving);
 	} else {
 		wlr_log(WLR_ERROR, "output commit failed (frame drawn ahead)");
 	}
@@ -15004,9 +15017,8 @@ static void render_frame(struct zt_server *server, bool show) {
 	frame_quads = frame_uploads = 0;
 	frame_px = frame_upload_bytes = 0;
 
-	if (app && app->mapped) {
-		clock_gettime(CLOCK_MONOTONIC, &draw.when);
-		wlr_xdg_surface_for_each_surface(app->xdg_toplevel->base, frame_done_surface, &draw);
+	if (show) {
+		frames_done(app);
 	}
 
 	/* frame times while animating, reported once things settle */

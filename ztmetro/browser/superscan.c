@@ -1771,7 +1771,10 @@ int main(int argc, char **argv) {
 		"vp9dec:NONE,avdec_vp9:NONE,vp8dec:NONE,avdec_vp8:NONE,avdec_av1:NONE,dav1ddec:NONE,av1dec:NONE,"
 		/* the MFC (media/) still stalls on YouTube's MSE streams (error
 		 * 0x22, no key frame): software decoding until that is fixed */
-		"v4l2h264dec:NONE,v4l2h265dec:NONE,v4l2mpeg4dec:NONE,v4l2mpeg2dec:NONE,v4l2h263dec:NONE", 0);
+		"v4l2h264dec:NONE,v4l2h265dec:NONE,v4l2mpeg4dec:NONE,v4l2mpeg2dec:NONE,v4l2h263dec:NONE,"
+		/* (with the software VP9 and VP8 decoders hidden, these two were all
+		 * that was left for them: the M20's MFC timed out on a site's VP9) */
+		"v4l2vp9dec:NONE,v4l2vp8dec:NONE", 0);
 	const char *home = getenv("HOME");
 	snprintf(B.data_dir, sizeof(B.data_dir), "%s/.local/share/superscan", home ? home : "/tmp");
 	{

@@ -1541,6 +1541,10 @@ struct webview *webview_create(struct wl_display *display, struct wl_compositor 
 }
 
 void webview_place(struct webview *wv, int x, int y, int w, int h, int scale) {
+	/* a phone whose GPU cannot fill its screen with a moving page renders it
+	 * at fewer pixels a point, and the shell scales it up (the M20: 2 of 3) */
+	const char *most = getenv("ZTB_MAX_SCALE");
+	if (most && atoi(most) > 0 && scale > atoi(most)) scale = atoi(most);
 	wv->x = x; wv->y = y; wv->w = w; wv->h = h; wv->scale = scale;
 	if (wv->view) {
 		/* logical size in CSS pixels plus the device scale: the page lays out
