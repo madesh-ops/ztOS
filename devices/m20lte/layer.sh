@@ -18,7 +18,9 @@ grep -v '^#' "$D/rootfs/from-s9" | while read -r f; do
 done
 cp -a "$D/rootfs/overlay/." "$R/"
 # git keeps no mode for these, and sudo ignores a sudoers file that is not 0440
-chmod 440 "$R/etc/sudoers.d/10-proxy"
+for f in "$R"/etc/sudoers.d/*; do
+	[ -f "$f" ] && chmod 440 "$f"
+done
 # The panel is the bootloader's and has no kernel driver: dsi.py talks to
 # its DSIM over /dev/mem, as ztos-panel-selfmask does on the S9. On the
 # phone it is ztos-m20-dsi (touch | init | cmd).
