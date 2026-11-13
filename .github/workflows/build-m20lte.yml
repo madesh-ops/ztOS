@@ -30,7 +30,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             dosfstools e2fsprogs libarchive-tools mtools qemu-user-static \
-            binfmt-support util-linux xz-utils zstd curl python3
+            binfmt-support util-linux xz-utils zstd curl python3 qt6-base-dev-tools
+          # the SDK compiles the apps' .ui files with Qt's uic (-g python)
+          sudo ln -sf /usr/lib/qt6/libexec/uic /usr/lib/qt6/uic
+          /usr/lib/qt6/uic --version
 
       - name: Configure namespaces and mount propagation
         run: |
