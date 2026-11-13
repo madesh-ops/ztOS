@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 #include <math.h>
 #include <poll.h>
+#include <time.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -86,7 +87,11 @@ struct webview {
 	struct wl_surface *direct_surface;
 	struct wl_subsurface *direct_sub;
 	struct wp_viewport *direct_view;	/* the subsurface cut to the page's box */
+	int scrollers;		/* what scrolls under the finger (webview_scrollers_at), -1 not known */
 	bool direct_on;		/* a WebKit frame is on the subsurface */
+	struct wl_callback *direct_cb;	/* the shell's word that it is on its way to the panel */
+	WPEBuffer *direct_wait;	/* the frame WebKit hears about then */
+	gint64 direct_wait_at;
 	bool direct_hidden;	/* put under Superscan's window: something of ours is in the page's place */
 	bool direct_synced;	/* in step with the window while the page is pulled past an end */
 	int direct_x, direct_y;
@@ -200,13 +205,20 @@ static void snap_done(GObject *source, GAsyncResult *result, gpointer data) {
 	webview_unref(wv);
 }
 
+/* ZTB_NO_PICTURE: drags always move the live page. On the M20 a picture of the
+ * whole document held up the page as it was taken, and fading back from it
+ * showed black until WebKit's next frame. */
+static bool picture_scroller(void) {
+	return !getenv("ZTB_NO_PICTURE");
+}
+
 static gboolean snap_take(gpointer data) {
 	struct webview *wv = data;
 	wv->snap_timer = 0;
 	if (getenv("ZTB_TRACE"))
 		fprintf(stderr, "superscan snapshot: due (busy %d shown %d moving %d max %.0f)\n",
 			wv->snap_busy, wv->shown, wv->snap_mode, wv->doc_max);
-	if (wv->destroying || wv->snap_busy || !wv->shown || wv->paused) return G_SOURCE_REMOVE;
+	if (!picture_scroller() || wv->destroying || wv->snap_busy || !wv->shown || wv->paused) return G_SOURCE_REMOVE;
 	if (wv->snap_mode || wv->overscroll != 0) {	/* not while it moves: later */
 		snap_later(wv, 800);
 		return G_SOURCE_REMOVE;
@@ -596,17 +608,56 @@ G_DEFINE_TYPE(ZtDisplay, zt_display, WPE_TYPE_DISPLAY)
 static WPEScreen *the_screen;	/* one phone, one panel */
 static gint64 last_tick;	/* when the panel last ticked WebKit's clock (ZTB_TRACE) */
 
+/* The panel's beat on a display with no vblank (the M20's framebuffer): each
+ * frame callback says when the shell sent a frame up, on the shell's own steady
+ * 60 Hz, so a timer here follows that instead of sliding past it, a skipped or
+ * doubled frame each time the two crossed. */
+#define BEAT_US 16667
+static gint64 beat_phase, beat_seen;
+
+static void panel_beat(uint32_t ms) {
+	gint64 now = g_get_monotonic_time();
+	gint64 at = (now / 1000 - (uint32_t)((uint32_t)(now / 1000) - ms)) * 1000;
+	gint64 phase = __atomic_load_n(&beat_phase, __ATOMIC_ACQUIRE);
+	if (phase && now - __atomic_load_n(&beat_seen, __ATOMIC_RELAXED) < 200000) {
+		gint64 off = (at - phase) % BEAT_US;
+		if (off > BEAT_US / 2) off -= BEAT_US;
+		if (off < -BEAT_US / 2) off += BEAT_US;
+		at = phase + off / 4;	/* (the time is to the ms: a little at a time) */
+	}
+	__atomic_store_n(&beat_phase, at, __ATOMIC_RELEASE);
+	__atomic_store_n(&beat_seen, now, __ATOMIC_RELAXED);
+}
+
+/* sleep to the next beat after `last`, which it updates */
+static void beat_wait(gint64 *last) {
+	gint64 phase = __atomic_load_n(&beat_phase, __ATOMIC_ACQUIRE);
+	gint64 now = g_get_monotonic_time();
+	if (!phase) {
+		g_usleep(BEAT_US);
+		return;
+	}
+	gint64 next = phase + ((now - phase) / BEAT_US + 1) * BEAT_US;
+	if (next - *last < BEAT_US / 2) next += BEAT_US;	/* (the beat moved back a little) */
+	*last = next;
+	struct timespec t = { next / 1000000, (next % 1000000) * 1000 };
+	clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+}
+
 /* WebKit's clock for animation frames, scrolling and requestAnimationFrame.
  * Left alone it is a free-running 60 Hz timer that drifts against the panel,
  * so its frames beat with ours. This one ticks on the panel's own vblank,
  * read from the display controller (exynos; panfrost has no vblank), which
- * is the clock the shell flips on. */
+ * is the clock the shell flips on; with no vblank, the beat above. */
 static gpointer sync_loop(gpointer p) {
 	ZtSync *s = p;
 	WPEScreenSyncObserverClass *c = WPE_SCREEN_SYNC_OBSERVER_GET_CLASS(s);
+	gint64 last = 0;
 	while (g_atomic_int_get(&s->running)) {
 		drmVBlank vb = { .request = { .type = DRM_VBLANK_RELATIVE, .sequence = 1 } };
-		if (drmWaitVBlank(s->fd, &vb) != 0) {
+		if (s->fd < 0) {
+			beat_wait(&last);
+		} else if (drmWaitVBlank(s->fd, &vb) != 0) {
 			g_usleep(16667);	/* panel off: keep a slow beat */
 		}
 		if (g_atomic_int_get(&s->running)) {
@@ -657,7 +708,8 @@ static ZtSync *sync_new(void) {
 		}
 		close(fd);
 	}
-	return NULL;
+	fprintf(stderr, "superscan: WebKit's clock is the beat of the shell's frames" "\n");
+	return g_object_new(zt_sync_get_type(), NULL);
 }
 
 static ZtSync *the_sync;
@@ -681,10 +733,14 @@ static gboolean vblank_dispatch(gpointer unused) {
 
 static gpointer vblank_loop(gpointer data) {
 	guint generation = GPOINTER_TO_UINT(data);
+	gint64 last = 0;
 	while (g_atomic_int_get((gint *)&vblank_generation) == (gint)generation) {
 		drmVBlank vb = { .request = { .type = DRM_VBLANK_RELATIVE, .sequence = 1 } };
 		gint64 at;
-		if (drmWaitVBlank(the_sync->fd, &vb) != 0) {
+		if (!the_sync || the_sync->fd < 0) {
+			beat_wait(&last);
+			at = g_get_monotonic_time();
+		} else if (drmWaitVBlank(the_sync->fd, &vb) != 0) {
 			g_usleep(16667);	/* panel off: keep a slow beat */
 			at = g_get_monotonic_time();
 		} else {
@@ -712,7 +768,6 @@ gint64 webview_vblank_us(void) {
 }
 
 bool webview_on_vblank(void (*step)(void)) {
-	if (!the_sync || the_sync->fd < 0) return false;
 	if (step == vblank_step) return true;
 	g_atomic_int_inc((gint *)&vblank_generation);	/* (a thread running ends itself after its wait) */
 	vblank_step = step;
@@ -935,6 +990,30 @@ static void direct_stack(struct webview *wv, bool hidden) {
 	wv->direct_hidden = hidden;
 }
 
+/* WebKit may start the next frame. Told as each frame was handed over, it drew
+ * as fast as the GPU went (every 9 ms on the M20) and the panel showed one in
+ * two: told when the shell takes the frame, it draws one for each one shown. */
+static void direct_ack(struct webview *wv) {
+	if (wv->direct_cb) {
+		wl_callback_destroy(wv->direct_cb);
+		wv->direct_cb = NULL;
+	}
+	WPEBuffer *b = wv->direct_wait;
+	wv->direct_wait = NULL;
+	if (b) {
+		wpe_view_buffer_rendered(wv->view, b);
+		g_object_unref(b);
+		zmc_every(1, glib_tick);	/* (see frame_shown) */
+	}
+}
+
+static void direct_frame_done(void *data, struct wl_callback *cb, uint32_t ms) {
+	(void)cb;
+	panel_beat(ms);
+	direct_ack(data);
+}
+static const struct wl_callback_listener direct_frame_listener = { direct_frame_done };
+
 /* a WebKit frame straight to the shell; false if it cannot go that way */
 static bool direct_frame(struct webview *wv, WPEBuffer *buffer) {
 	if (!WPE_IS_BUFFER_DMA_BUF(buffer) || !direct_wanted(wv)) return false;
@@ -958,11 +1037,15 @@ static bool direct_frame(struct webview *wv, WPEBuffer *buffer) {
 	wv->direct_bh = wpe_buffer_get_height(buffer) / (double)k;
 	direct_place(wv);	/* (its cut goes with this commit) */
 	wl_surface_set_buffer_scale(wv->direct_surface, k);
+	direct_ack(wv);	/* (WebKit did not wait for one: it resized) */
 	wl_surface_attach(wv->direct_surface, wl, 0, 0);
 	wl_surface_damage_buffer(wv->direct_surface, 0, 0, INT32_MAX, INT32_MAX);
+	wv->direct_cb = wl_surface_frame(wv->direct_surface);
+	wl_callback_add_listener(wv->direct_cb, &direct_frame_listener, wv);
+	wv->direct_wait = g_object_ref(buffer);
+	wv->direct_wait_at = g_get_monotonic_time();
 	wl_surface_commit(wv->direct_surface);
 	wl_display_flush(zmc.display);
-	wpe_view_buffer_rendered(wv->view, buffer);	/* WebKit may start the next one now */
 	/* Frames Superscan drew itself before this (the picture scroller's
 	 * fade, a frame before the shell had its buffer) are done with: hand
 	 * them back. Kept, each spell of drawing it ourselves locked another
@@ -986,6 +1069,7 @@ static bool direct_frame(struct webview *wv, WPEBuffer *buffer) {
 /* back to drawing the page ourselves (the picture scroller, a hidden tab):
  * the frame goes back to the shell, which hands it back to WebKit */
 static void direct_off(struct webview *wv) {
+	direct_ack(wv);
 	if (!wv->direct_on) return;
 	wv->direct_on = false;
 	wl_surface_attach(wv->direct_surface, NULL, 0, 0);
@@ -1100,6 +1184,9 @@ static void zt_view_init(ZtView *v) { (void)v; }
 static gboolean dpy_connect(WPEDisplay *d, GError **error) {
 	ZtDisplay *z = (ZtDisplay *)d;
 	if (!z->connected) z->connected = wpe_display_connect(z->inner, error);
+	/* said here or a page takes this for a computer with a mouse: YouTube's
+	 * player paused at a tap, as at a click, instead of showing its controls */
+	if (z->connected) wpe_display_set_available_input_devices(d, WPE_AVAILABLE_INPUT_DEVICE_TOUCHSCREEN);
 	return z->connected;
 }
 static WPEToplevel *dpy_create_toplevel(WPEDisplay *d, guint max_views) {
@@ -1679,12 +1766,43 @@ void webview_touch_cancel(struct webview *wv) {
  * wpeScrollDeltaMultiplier): handed over divided, the page keeps to the
  * finger instead of running 2.5 times ahead of it. */
 #define WPE_TOUCHPAD_MULTIPLIER 2.5
-void webview_pan(struct webview *wv, double dy, double x, double y, bool stop) {
+void webview_pan(struct webview *wv, double dx, double dy, double x, double y, bool stop) {
 	if (!wv || !wv->view) return;
 	send(wv, wpe_event_scroll_new(wv->view, WPE_INPUT_SOURCE_TOUCHPAD,
-		(guint32)(g_get_monotonic_time() / 1000), 0, 0, -dy / WPE_TOUCHPAD_MULTIPLIER, TRUE, stop, x, y));	/* (a touchpad's deltas point the other way) */
-	if (getenv("ZTB_DEBUG")) fprintf(stderr, "superscan: pan %.1f%s\n", dy, stop ? " stop" : "");
+		(guint32)(g_get_monotonic_time() / 1000), 0, -dx / WPE_TOUCHPAD_MULTIPLIER, -dy / WPE_TOUCHPAD_MULTIPLIER,
+		TRUE, stop, x, y));	/* (a touchpad's deltas point the other way) */
+	if (getenv("ZTB_DEBUG")) fprintf(stderr, "superscan: pan %.1f,%.1f%s\n", dx, dy, stop ? " stop" : "");
 }
+
+static void scrollers_done(GObject *source, GAsyncResult *result, gpointer data) {
+	struct webview *wv = data;
+	JSCValue *value = webkit_web_view_evaluate_javascript_finish(WEBKIT_WEB_VIEW(source), result, NULL);
+	if (value) {
+		if (!wv->destroying) wv->scrollers = jsc_value_to_int32(value);
+		g_object_unref(value);
+	}
+	webview_unref(wv);
+}
+
+void webview_scrollers_at(struct webview *wv, double x, double y) {
+	if (!wv || !wv->web) return;
+	char script[720];
+	g_snprintf(script, sizeof script,
+		"(()=>{let n=0,r=document.scrollingElement;"
+		"const y=o=>o=='auto'||o=='scroll';"
+		"for(let e=document.elementFromPoint(%d,%d);e&&e!=r&&e!=document.body;e=e.parentElement){"
+		"const s=getComputedStyle(e);"
+		"if(y(s.overflowX)&&e.scrollWidth>e.clientWidth+1)n|=1;"
+		"if(y(s.overflowY)&&e.scrollHeight>e.clientHeight+1)n|=2}"
+		"if(r&&r.scrollWidth>r.clientWidth+1&&getComputedStyle(document.body).overflowX!='hidden')n|=1;"
+		"return n})()",
+		(int)x, (int)y);
+	wv->scrollers = -1;
+	wv->refs++;
+	webkit_web_view_evaluate_javascript(wv->web, script, -1, NULL, NULL, NULL, scrollers_done, wv);
+}
+
+int webview_scrollers(struct webview *wv) { return wv ? wv->scrollers : -1; }
 
 /* one key press and release; keycodes are evdev + 8, as XKB counts them */
 static void key_tap(struct webview *wv, guint keycode, guint keyval) {
@@ -1714,7 +1832,7 @@ double webview_scroll_max(struct webview *wv) { return wv ? wv->doc_max : 0; }
 void webview_overscroll(struct webview *wv, double points) { if (wv) wv->overscroll = points; }
 
 bool webview_snap_ready(struct webview *wv) {
-	return wv && wv->snap && wv->doc_max > 0 && fabs(wv->snap_h - (wv->doc_max + wv->h)) < 4;
+	return picture_scroller() && wv && wv->snap && wv->doc_max > 0 && fabs(wv->snap_h - (wv->doc_max + wv->h)) < 4;
 }
 
 void webview_snap_begin(struct webview *wv, double position) {
@@ -1846,7 +1964,11 @@ static void glib_ready(int fd, void *data) { (void)fd; (void)data; webview_pump(
 static void glib_tick(void) { webview_pump(); }
 
 void webview_pump(void) {
-	for (struct webview *wv=views; wv; wv=wv->next) webview_pause(wv, !zmc.active || !wv->shown);
+	for (struct webview *wv=views; wv; wv=wv->next) {
+		webview_pause(wv, !zmc.active || !wv->shown);
+		/* the shell only answers while it draws (the screen went off) */
+		if (wv->direct_wait && g_get_monotonic_time() - wv->direct_wait_at > 100000) direct_ack(wv);
+	}
 	GMainContext *c = g_main_context_default();
 	while (g_main_context_iteration(c, FALSE)) {
 	}

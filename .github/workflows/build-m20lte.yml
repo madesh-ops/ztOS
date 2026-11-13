@@ -1,0 +1,62 @@
+name: Build ztOS for the Galaxy M20
+
+# The M20's root image only, from this branch, as a run artifact (no release).
+# The boot image and the kernel's modules are built with the kernel
+# (devices/m20lte/scripts/build-boot.sh), not here.
+on:
+  push:
+    branches:
+      - m20lte-ci
+  workflow_dispatch:
+
+jobs:
+  build-m20lte:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Make room on the runner
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dosfstools e2fsprogs libarchive-tools mtools qemu-user-static \
+            binfmt-support util-linux xz-utils zstd curl python3
+
+      - name: Configure namespaces and mount propagation
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo mount --make-rprivate /
+          sudo usermod --add-subuids 100000-165535 runner || true
+          sudo usermod --add-subgids 100000-165535 runner || true
+          sudo systemctl restart systemd-binfmt.service || true
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 || true
+
+      - name: Build ztOS for the Galaxy M20 (m20lte)
+        run: |
+          sudo python3 installer/ztos build --target m20lte --user ztos --password ztos \
+            --hostname m20lte --timezone Asia/Kolkata
+
+      - name: Compress the root image
+        run: |
+          mkdir -p out
+          sudo zstd -T0 -10 --rm build/ztos/m20lte/root.img -o out/ztos-m20lte-root.img.zst
+          sudo chown runner out/*
+          cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt && ls -la
+
+      - name: Upload the root image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ztos-m20lte-root
+          path: out/
+          compression-level: 0
+          retention-days: 7

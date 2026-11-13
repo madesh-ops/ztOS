@@ -1,0 +1,10 @@
+[Unit]
+Description=ztOS: record a frozen system and restart it
+
+[Service]
+ExecStart=/usr/local/bin/ztos-hangwatch
+Restart=always
+OOMScoreAdjust=-1000
+
+[Install]
+WantedBy=multi-user.target

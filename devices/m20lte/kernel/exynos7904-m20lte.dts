@@ -799,6 +799,17 @@
 	};
 };
 
+/* i2c_1: the S2MU004 itself (charger, MUIC; s2mu004@3D in the M20 kernel) */
+&i2c_1 {
+	status = "okay";
+
+	/* devices/m20lte/drivers/zrn-s2mu004-chg.c */
+	charger@3d {
+		compatible = "zerone,s2mu004-charger";
+		reg = <0x3d>;
+	};
+};
+
 /* i2c_4: the TI LM3632 backlight and display bias
  * (display-lcd_m20_common.dtsi) */
 &i2c_4 {

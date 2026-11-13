@@ -382,6 +382,14 @@ static struct {
 	 * handed to WebKit, given once a frame */
 	bool pan, pan_fling;
 	double owed, pan_x, pan_y;
+	/* sideways: once a drag is clearly across (h_lock) it stays across, and
+	 * over a native scroller (asked of the page once, h_asked) it pans along
+	 * x the same way (pan_h). Anything else stays touches, for pages that
+	 * follow the finger themselves. The same answer keeps a panel that
+	 * scrolls in a page that does not (YouTube's comments) from being
+	 * taken for a pull past the page's end */
+	bool h_lock, h_asked, pan_h;
+	double down_x;
 	/* the finger's last few places and times while it pans, and the place
 	 * whose travel WebKit has been given: each vblank the page goes to where
 	 * the finger was a little before it (pan_finger), not by whatever travel
@@ -561,10 +569,14 @@ static void pan_catch_up(void) {
 	S.samp_n = 0;
 }
 
+static void pan_send(struct webview *view, bool stop) {
+	webview_pan(view, S.pan_h ? S.owed : 0, S.pan_h ? 0 : S.owed, S.pan_x, S.pan_y, stop);
+}
+
 static void pan_end(struct webview *view) {
-	if (view) webview_pan(view, S.owed, S.pan_x, S.pan_y, true);
+	if (view) pan_send(view, true);
 	S.owed = 0;
-	S.pan = S.pan_fling = false;
+	S.pan = S.pan_fling = S.pan_h = false;
 	if (pan_vblank) clock_stop();	/* (the picture scroller may want the frames next) */
 }
 
@@ -580,7 +592,7 @@ static void pan_step(void) {
 		S.vel *= pow(DECEL, dt);
 		S.owed += (before + S.vel) / 2 * dt;
 		double at = view ? webview_scroll_y(view) : 0, max = view ? webview_scroll_max(view) : 0;
-		bool edge = (S.vel < 0 && at <= 0.5) || (S.vel > 0 && at >= max - 0.5);
+		bool edge = !S.pan_h && ((S.vel < 0 && at <= 0.5) || (S.vel > 0 && at >= max - 0.5));
 		if (!view || fabs(S.vel) < 0.02 || edge) {
 			pan_end(view);
 			clock_stop();
@@ -596,7 +608,7 @@ static void pan_step(void) {
 		S.sent_y = y;
 	}
 	if (view && S.owed != 0) {
-		webview_pan(view, S.owed, S.pan_x, S.pan_y, false);
+		pan_send(view, false);
 		S.owed = 0;
 	}
 	if (!S.pan) clock_stop();
@@ -1565,6 +1577,8 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 		S.down = true;
 		S.id = id;
 		S.down_y = S.last_fwd_y = y - cy;
+		S.down_x = x - cx;
+		S.h_lock = S.h_asked = false;
 		S.pulling = fabs(held) >= 0.3;
 		S.shown = held;
 		if (S.pulling) {
@@ -1588,9 +1602,32 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 			webview_touch_motion(view, id, x - cx, y - cy, time);
 			return true;
 		}
-		double py = y - cy;
+		double py = y - cy, px = x - cx;
 		boost(1500);
-		if (!S.snap && !S.pulling && S.webkit && fabs(py - S.down_y) > 8 && webview_snap_ready(view)) {
+		if (S.webkit && !S.pan && !S.pulling) {
+			double across = fabs(px - S.down_x), along = fabs(py - S.down_y);
+			if (!S.h_asked && (across > 3 || along > 3)) {
+				S.h_asked = true;
+				webview_scrollers_at(view, S.down_x, S.down_y);
+			}
+			if (across > 8 && across > along * 1.5) S.h_lock = true;
+			if (S.h_lock && webview_scrollers(view) > 0 && (webview_scrollers(view) & WV_SCROLLS_ACROSS)) {
+				webview_touch_cancel(view);
+				S.webkit = false;
+				S.pan = S.pan_h = true;
+				S.vel = 0;
+				S.owed = 0;
+				S.sent_y = S.last_fwd_y = px;	/* (from here: WebKit has had the travel so far) */
+				S.samp_n = 0;
+				pan_sample(px, time);
+				S.pan_x = px;
+				S.pan_y = py;
+				S.move_us = g_get_monotonic_time();
+				clock_start_pan();
+				return true;
+			}
+		}
+		if (!S.snap && !S.h_lock && !S.pulling && S.webkit && fabs(py - S.down_y) > 8 && webview_snap_ready(view)) {
 			/* a drag: from here the picture moves, not WebKit */
 			webview_touch_cancel(view);
 			S.webkit = false;
@@ -1602,9 +1639,11 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 				zmc_on_frame(frame_step);
 			}
 		}
-		if (!S.snap && !S.pan && !S.pulling && S.webkit && fabs(py - S.down_y) > 8) {
+		if (!S.snap && !S.pan && !S.h_lock && !S.pulling && S.webkit && fabs(py - S.down_y) > 8) {
 			double at = webview_scroll_y(view), max = webview_scroll_max(view);
 			bool pull = (py > S.down_y && at <= 0.5) || (py < S.down_y && at >= max - 0.5);
+			int inner = webview_scrollers(view);
+			if (inner > 0 && (inner & WV_SCROLLS_ALONG)) pull = false;
 			if (!pull) {
 				/* a drag with no picture to move: WebKit scrolls it off its
 				 * main thread, a frame at a time */
@@ -1626,6 +1665,7 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 		}
 		if (S.pan) {
 			gint64 now = g_get_monotonic_time();
+			if (S.pan_h) py = px;	/* (one axis at a time: the same steps along x) */
 			double d = S.last_fwd_y - py;
 			pan_sample(py, time);
 			double dt = (now - S.move_us) / 1000.0;
@@ -1654,7 +1694,8 @@ static bool touch(int phase, int id, double x, double y, uint32_t time) {
 			snap_show(view, ch);
 			return true;
 		}
-		if (!S.pulling) {
+		int inner = S.pulling || !S.h_asked ? 0 : webview_scrollers(view);
+		if (!S.pulling && !S.h_lock && inner >= 0 && !(inner & WV_SCROLLS_ALONG)) {
 			double at = webview_scroll_y(view), max = webview_scroll_max(view);
 			/* not before the finger has clearly moved: a tap that wobbles stays a tap */
 			if (py > S.last_fwd_y && py - S.down_y > 8 && at <= 0.5) {

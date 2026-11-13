@@ -1,0 +1,45 @@
+--- a/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c	2026-11-07 23:08:05.097641703 +0530
++++ b/drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c	2026-11-07 23:13:14.207916840 +0530
+@@ -8,6 +8,7 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/delay.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
+@@ -1087,7 +1088,7 @@
+ 	unsigned long flags;
+ 	struct s5p_mfc_ctx *ctx = vb2_get_drv_priv(q);
+ 	struct s5p_mfc_dev *dev = ctx->dev;
+-	int aborted = 0;
++	int aborted = 0, timed_out = 0, waited = 0;
+ 
+ 	spin_lock_irqsave(&dev->irqlock, flags);
+ 	if ((ctx->state == MFCINST_FINISHING ||
+@@ -1095,10 +1096,23 @@
+ 		dev->curr_ctx == ctx->num && dev->hw_lock) {
+ 		ctx->state = MFCINST_ABORT;
+ 		spin_unlock_irqrestore(&dev->irqlock, flags);
+-		s5p_mfc_wait_for_done_ctx(ctx,
+-					S5P_MFC_R2H_CMD_FRAME_DONE_RET, 0);
++		/*
++		 * hw_lock may be try_run() looking for work, with no frame in
++		 * flight and so no interrupt to wait for: that wait ran out two
++		 * seconds later and the DPB was never flushed, and a seek left
++		 * the decoder black. The lock goes either way.
++		 */
++		while (test_bit(0, &dev->hw_lock) && waited++ < 2 * MFC_INT_TIMEOUT)
++			usleep_range(500, 1000);
++		timed_out = test_bit(0, &dev->hw_lock);
+ 		aborted = 1;
+ 		spin_lock_irqsave(&dev->irqlock, flags);
++		if (timed_out)
++			mfc_err("frame in flight: ctx %d, current %d, hw_lock %lx, src %d dst %d of %d\n",
++				ctx->num, dev->curr_ctx, dev->hw_lock, ctx->src_queue_cnt,
++				ctx->dst_queue_cnt, ctx->pb_count);
++		else
++			ctx->state = MFCINST_RUNNING;	/* the flush below must still run */
+ 	}
+ 	if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+ 		s5p_mfc_cleanup_queue(&ctx->dst_queue, &ctx->vq_dst);

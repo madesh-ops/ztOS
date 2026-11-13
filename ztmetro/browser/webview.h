@@ -76,8 +76,14 @@ void webview_touch_down(struct webview *wv, int id, double x, double y, unsigned
 void webview_touch_motion(struct webview *wv, int id, double x, double y, unsigned time);
 void webview_touch_up(struct webview *wv, int id, unsigned time);
 void webview_touch_cancel(struct webview *wv);
-/* scroll the page by dy points on WebKit's scrolling thread (a touchpad's way) */
-void webview_pan(struct webview *wv, double dy, double x, double y, bool stop);
+/* scroll by dx, dy points on WebKit's scrolling thread (a touchpad's way) */
+void webview_pan(struct webview *wv, double dx, double dy, double x, double y, bool stop);
+/* ask the page what scrolls by itself at x,y; the answer comes when the page's
+ * main thread gets to it: until then webview_scrollers says -1, then these */
+#define WV_SCROLLS_ACROSS	1	/* it, or the page, scrolls sideways */
+#define WV_SCROLLS_ALONG	2	/* something in the page scrolls up and down */
+void webview_scrollers_at(struct webview *wv, double x, double y);
+int webview_scrollers(struct webview *wv);
 /* step() on the main thread once each vblank of the panel (NULL: no more);
  * false if there is no vblank to be had */
 bool webview_on_vblank(void (*step)(void));

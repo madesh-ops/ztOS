@@ -966,3 +966,8 @@ apply_patch("s5p-mfc-vp9-hevc-first-frame.patch",
 apply_patch("s5p-mfc-extra-dpb.patch",
             "drivers/media/platform/samsung/s5p-mfc/s5p_mfc_common.h",
             "MFC_MAX_EXTRA_DPB       16")
+# ... and a seek took try_run()'s look for work for a frame in flight: two seconds
+# waiting for an interrupt that was not coming, and no DPB flush after them.
+apply_patch("s5p-mfc-stop-mid-frame.patch",
+            "drivers/media/platform/samsung/s5p-mfc/s5p_mfc_dec.c",
+            "the flush below must still run")

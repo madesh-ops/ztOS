@@ -54,6 +54,7 @@
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <sys/ioctl.h>
+#include <sched.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
@@ -8210,10 +8211,50 @@ static void start_turn(struct zt_server *server, bool away, uint32_t delay) {
 static void perf_tell(const char *command);
 static pid_t toplevel_pid(struct zt_toplevel *toplevel);
 
+/* Where the shell may run: it draws every frame anyone sees, so on a phone
+ * with fast and slow cores it stays on the fast ones, or an app's work on the
+ * slow cores holds up the whole screen. Threads started later inherit this;
+ * what it starts goes back to every core (child_priority). */
+static cpu_set_t every_core;
+
+static void cores_setup(void) {
+	sched_getaffinity(0, sizeof(every_core), &every_core);
+	int cpus = sysconf(_SC_NPROCESSORS_CONF), top = 0, bottom = 1 << 30;
+	int capacity[CPU_SETSIZE] = {0};
+	for (int i = 0; i < cpus && i < CPU_SETSIZE; i++) {
+		char path[64];
+		snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpu_capacity", i);
+		FILE *f = fopen(path, "r");
+		if (!f) {
+			return;	/* the same cores throughout */
+		}
+		if (fscanf(f, "%d", &capacity[i]) != 1) {
+			capacity[i] = 0;
+		}
+		fclose(f);
+		top = capacity[i] > top ? capacity[i] : top;
+		bottom = capacity[i] < bottom ? capacity[i] : bottom;
+	}
+	if (top == bottom) {
+		return;
+	}
+	cpu_set_t fast;
+	CPU_ZERO(&fast);
+	for (int i = 0; i < cpus && i < CPU_SETSIZE; i++) {
+		if (capacity[i] == top && CPU_ISSET(i, &every_core)) {
+			CPU_SET(i, &fast);
+		}
+	}
+	if (CPU_COUNT(&fast) > 0 && sched_setaffinity(0, sizeof(fast), &fast) == 0) {
+		wlr_log(WLR_INFO, "cores: the shell runs on the %d fastest", CPU_COUNT(&fast));
+	}
+}
+
 /* In a child about to become something else: none of the shell's own place
  * in line for the CPU (zrnperfd raises it) goes with it. Lowering one's own
  * priority is always allowed. */
 static void child_priority(void) {
+	sched_setaffinity(0, sizeof(every_core), &every_core);
 	struct {
 		uint32_t size, policy;
 		uint64_t flags;
@@ -15558,6 +15599,7 @@ static int render_to_files(struct zt_server *server, const char *dir) {
 int main(int argc, char *argv[]) {
 	wlr_log_init(getenv("ZTMETRO_DEBUG") ? WLR_DEBUG : WLR_INFO, NULL);
 	memory_setup();
+	cores_setup();
 	/* children are reaped by the kernel; nothing here waits for them */
 	signal(SIGCHLD, SIG_IGN);
 
