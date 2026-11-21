@@ -82,7 +82,7 @@ devices/ztdevices: devices/ztdevices.c $(CORE_DEPS)
 	$(APP_BUILD) -o $@ devices/ztdevices.c $(CORE) $(APP_LIBS)
 
 # File browser: the same ZrnMetroCore pages, tilt and turnstile transitions.
-files/ztfiles: files/ztfiles.c $(CORE_DEPS)
+files/ztfiles: files/ztfiles.c files/photo-view.h $(CORE_DEPS)
 	$(APP_BUILD) $(shell pkg-config --cflags gio-2.0) -o $@ files/ztfiles.c $(CORE) $(APP_LIBS) $(shell pkg-config --libs gio-2.0)
 
 # OSIAL Management: ztOSIAL's interfaces, whether they answer, and the device's capabilities

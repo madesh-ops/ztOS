@@ -335,7 +335,10 @@ static void launch_handler(int index, bool set_default) {
 	zmc_redraw();
 }
 
+#include "photo-view.h"
+
 static double render(cairo_t *cr, int page) {
+	if (page == PAGE_PHOTO) return photo_render(cr);
 	if (page == 1) {
 		double y = zmc_header(cr, "installing");
 		zmc_field(cr, y, "status", "Installing with ztOSAndroidRuntimeV1");
@@ -432,11 +435,13 @@ static void activate(int action, int arg) {
 	}
 	if (action != ACT_FILE || arg < 0 || arg >= n_files || !path_for(files[arg].name, selected)) return;
 	if (has_suffix(selected, ".apk")) { child_start_inspect(selected); return; }
+	if (is_photo(selected)) { photo_open(arg); return; }
 	if (is_video(selected) && play_video(selected)) return;
 	menu_open_file(selected);
 }
 
 static bool back(void) {
+	if (zmc.page == PAGE_PHOTO) { zmc_on_frame(NULL); zmc_go(0, -1); return true; }
 	if (menu != MENU_NONE) { menu = MENU_NONE; handlers_clear(); zmc_redraw(); return true; }
 	if (job > 0 && !job_done) return true;
 	if (strcmp(location, "/")) { go_parent(); return true; }
@@ -459,12 +464,17 @@ static void install_tick(void) {
 }
 
 static void arrived(int page) {
-	if (page == 0) scan_location();
+	if (page == PAGE_PHOTO) photo_arrived();
+	if (page == 0) {
+		photo_cache_clear();	/* back from a photo: its pictures are let go */
+		scan_location();
+	}
 }
 
 static const struct zmc_app app = {
 	.app_id = "ztfiles", .title = "Files", .caps = "YOUR FILES",
 	.render = render, .activate = activate, .back = back, .arrived = arrived,
+	.overlay = photo_overlay, .touch = photo_touch, .overlay_above_header = true,
 };
 
 int main(int argc, char **argv) {
@@ -476,6 +486,12 @@ int main(int argc, char **argv) {
 		if (slash && slash != path) { size_t n = (size_t)(slash-path); if (n < sizeof(location)) { memcpy(location,path,n); location[n]=0; } }
 		else if (slash == path) snprintf(location,sizeof(location),"/");
 		scan_location();
+		if (is_photo(path)) {
+			/* opened on a photo: it, with its folder's others to swipe to */
+			for (int i = 0; i < n_files; i++) {
+				if (!strcmp(files[i].name, slash + 1)) { photo_prepare(i); return zmc_run(&app, PAGE_PHOTO); }
+			}
+		}
 		if (has_suffix(path,".apk")) child_start_inspect(path);
 		else if (is_video(path) && play_video(path)) return 0;	/* (opened only to play it) */
 		else menu_open_file(path);
