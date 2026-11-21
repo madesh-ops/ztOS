@@ -809,3 +809,4 @@ module_exit(m20cam_exit);
 MODULE_SOFTDEP("pre: i2c-gpio");
 MODULE_DESCRIPTION("Galaxy M20 rear camera (S5K3L6) as /dev/zrn-cam, RAW through CSIS1");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("DMA_BUF");
