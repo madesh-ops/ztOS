@@ -2,18 +2,23 @@
 # The Galaxy M20's libgallium, with pan-bi-g71-derivatives.diff (the Mali-G71
 # returns 0 for derivatives: text and edges drawn by GTK4 and Firefox break),
 # built on the phone itself for whatever mesa pacman has installed, and put in
-# place of Arch Linux ARM's (which is kept beside it).
+# its own folder, /usr/lib/ztos-mesa-m20: Arch Linux ARM's library in /usr/lib
+# is never touched. The session (os/overlay-m20lte/etc/ztos/session.env) puts
+# that folder first in LD_LIBRARY_PATH for the shell and every app it starts,
+# and falls back to Arch's library by itself after a start that froze.
+# (Replacing /usr/lib's library froze the phone at boot twice, 2026-11-20; the
+# same library from this folder boots and runs.)
 #
-#   build-mesa.sh auto       # what ztos-m20-mesa.service runs: if the library
-#                            # in place is not ours, build, check, install
+#   build-mesa.sh auto       # what ztos-m20-mesa.service runs: if there is no
+#                            # library of ours for this mesa, build, check, install
 #   build-mesa.sh build      # download, verify, patch, configure, build
-#   build-mesa.sh install    # check it, then replace the system library
-#   build-mesa.sh restore    # put Arch's library back
+#   build-mesa.sh install    # check it, then put it in /usr/lib/ztos-mesa-m20
+#   build-mesa.sh restore    # remove ours: everything uses Arch's again
 #
-# Run as root. A mesa update from pacman replaces the library; the pacman hook
-# 90-ztos-m20-mesa.hook then starts ztos-m20-mesa.service, which runs `auto`
-# (it also runs at every boot, so a fresh install or a build cut short by a
-# reboot is caught up). Until it is done, about half an hour, apps draw with
+# Run as root. A mesa update from pacman brings a new library name; the pacman
+# hook 90-ztos-m20-mesa.hook then starts ztos-m20-mesa.service, which runs
+# `auto` (it also runs at every boot, so a fresh install or a build cut short
+# by a reboot is caught up). Until it is done, about an hour, apps draw with
 # Arch's library: the derivative glitch is back for that time.
 #
 # The source is checked against the sha256 in Arch's own PKGBUILD for the
@@ -39,6 +44,8 @@ LIB=$(ls /usr/lib/libgallium-"$VER"-*.so 2>/dev/null | head -1)
 ARCHVER=$(basename "$LIB" .so | sed 's/^libgallium-//')
 SRC=$W/mesa-$VER
 NEW=$SRC/build-arch/src/gallium/targets/dri/libgallium-$ARCHVER.so
+DEST=/usr/lib/ztos-mesa-m20
+OURS=$DEST/libgallium-$ARCHVER.so
 
 # a word to everyone's shell (a notification), if they are logged in
 tell() {
@@ -48,13 +55,14 @@ tell() {
 	return 0
 }
 
-ours() { [ -f "$STATE" ] && [ "$(sha256sum "$LIB" | cut -d' ' -f1)" = "$(cat "$STATE")" ]; }
+ours() { [ -f "$STATE" ] && [ -f "$OURS" ] && [ "$(sha256sum "$OURS" | cut -d' ' -f1)" = "$(cat "$STATE")" ]; }
 
 build() {
 	# pacman holds its lock while its hooks run, and this may be started by one
 	while [ -e /var/lib/pacman/db.lck ]; do sleep 5; done
 	pacman -S --needed --noconfirm meson ninja python-mako python-yaml python-packaging \
-		python-pyelftools glslang > /dev/null
+		python-pyelftools glslang llvm clang libclc spirv-llvm-translator spirv-tools \
+		python-ply python-pycparser > /dev/null
 	mkdir -p $W && cd $W
 	if [ ! -f mesa-$VER.sha256 ]; then
 		sum=
@@ -99,17 +107,17 @@ install_lib() {
 	have=$(nm -D --defined-only "$NEW" | awk '{print $3}' | sed 's/@.*//' | sort -u)
 	missing=$(printf '%s\n' "$need" | grep -vxF "$have" || true)
 	[ -z "$missing" ] || { printf 'the new library lacks:\n%s\n' "$missing" >&2; return 1; }
-	# Arch's, kept for this version; those of versions gone are dropped
-	# (the one in place is Arch's unless it is the one we installed last)
-	ours || cp -a "$LIB" "$LIB.arch"
-	for old in /usr/lib/libgallium-*.so.arch; do
-		[ "$old" = "$LIB.arch" ] || rm -f "$old"
+	# ours for this version only: the loaders of a newer mesa name a newer
+	# library, which a stale one here would not match anyway
+	install -d -m755 "$DEST"
+	for old in "$DEST"/libgallium-*.so; do
+		[ "$old" = "$OURS" ] || rm -f "$old"
 	done
-	install -m755 "$NEW" "$LIB.new"
-	mv "$LIB.new" "$LIB"
+	install -m755 "$NEW" "$OURS.new"
+	mv "$OURS.new" "$OURS"
 	mkdir -p "$(dirname "$STATE")"
-	sha256sum "$LIB" | cut -d' ' -f1 > "$STATE"
-	echo "installed; Arch's library is kept as $LIB.arch"
+	sha256sum "$OURS" | cut -d' ' -f1 > "$STATE"
+	echo "installed as $OURS; Arch's $LIB is untouched"
 }
 
 case "${1:-}" in
@@ -137,12 +145,11 @@ install)
 	install_lib
 	;;
 restore)
-	mv "$LIB.arch" "$LIB"
-	rm -f "$STATE"
-	echo "restored Arch's library"
+	rm -f "$OURS" "$STATE"
+	echo "removed $OURS: the next start of the shell uses Arch's library"
 	;;
 *)
-	sed -n 7,10p "$0"
+	sed -n 12,15p "$0"
 	exit 2
 	;;
 esac

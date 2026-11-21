@@ -17,6 +17,14 @@ grep -v '^#' "$D/rootfs/from-s9" | while read -r f; do
 	install -D -m "$(stat -c %a "$DEVROOT/rootfs/overlay/$f")" "$DEVROOT/rootfs/overlay/$f" "$R/$f"
 done
 cp -a "$D/rootfs/overlay/." "$R/"
+# the M20's session settings (scale 3, AFBC off for the r0p0 G71) and its own
+# hardware list for ztOSCoreSensorFramework, in place of the S9's defaults
+cp -a "$DEVROOT/os/overlay-m20lte/." "$R/"
+# NetworkManager owns Wi-Fi (README: "NetworkManager owns Wi-Fi"); networkd
+# keeps only the USB link. With the base image's wl* network left in place,
+# networkd also took wlan0 and p2p0, and p2p0 never came up: wait-online held
+# network-online.target (and everything after it) for two minutes a boot
+rm -f "$R/etc/systemd/network/20-wlan.network"
 # git keeps no mode for these, and sudo ignores a sudoers file that is not 0440
 chmod 440 "$R/etc/sudoers.d/10-proxy"
 # The panel is the bootloader's and has no kernel driver: dsi.py talks to

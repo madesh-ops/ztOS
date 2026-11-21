@@ -6,7 +6,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=oneshot
+# exec, not oneshot: a oneshot holds multi-user.target (and the rest of the
+# boot) until the half-hour build ends
+Type=exec
 ExecStart=/usr/local/lib/ztos/mesa/build-mesa.sh auto
 # a half-hour compile, behind whatever the phone is doing
 Nice=19
