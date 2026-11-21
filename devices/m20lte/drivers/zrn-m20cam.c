@@ -861,8 +861,7 @@ static int __init m20cam_init(void)
 	ret = misc_register(&live_misc);
 	if (ret)
 		goto err_ws;
-	pr_info("zrn-m20cam: rear and front on /dev/zrn-cam, %zu MiB of frames at %pad, CSIS1 %08x CSIS0 %08x
-",
+	pr_info("zrn-m20cam: rear and front on /dev/zrn-cam, %zu MiB of frames at %pad, CSIS1 %08x CSIS0 %08x\n",
 		(size_t)LIVE_SIZE >> 20, &live_dma, readl(csis_rear + CSIS_VERSION), readl(csis_front + CSIS_VERSION));
 	return 0;
 
