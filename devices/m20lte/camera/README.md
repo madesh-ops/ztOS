@@ -25,6 +25,17 @@ from user space (GPIO character device, `/dev/mem`); nothing in the kernel yet.
   S5K3L6 model ID 0x30c6, revision 0xb0. Bus scan with power on: only 0x2d.
   `rear-power.sh off` restores every register and pin.
 
+- 2026-11-21: the camera blocks. PMU CAM_STATUS (0x11c84084) reads 0x3000f: the
+  camera and ISP power domains are on from the bootloader. CMU_CAM (0x14500000) is
+  readable with CMU_TOP's CAM bus gate (0x1206200c) forced to 0x300000: bus clock
+  from CMU_TOP (0x100 = 0x10), every Q-channel 0x3f0002 (clock request held, so
+  CSIS and CSIS DMA clocks run). CSIS1 (rear, 0x14410000) answers: VERSION 0x05010001,
+  the S9's CSIS v5.1 (0x05010000) one revision on, so camera/driver's receiver and
+  DMA code is the starting point, not Samsung's v4.0. CMN_CTRL 0x4000, CLK_CTRL 0xf0.
+  The rear PHY (PMU isolation 0x680) is still isolated.
+- `drivers/zrn-m20cam.c` (built by CI's modules_only run): 24 MiB at bus address
+  0xd9900000 in CMA, mmap through /dev/zrn-m20cam, filled with 0xa5.
+
 ## Next
 
 1. Front and rear-wide IDs (same steps, their supplies and pins).
