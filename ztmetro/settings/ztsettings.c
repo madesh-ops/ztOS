@@ -85,6 +85,7 @@ enum page {
 	PAGE_WALLS,	/* the background photo picker: categories, then one */
 	PAGE_NAVIGATION,
 	PAGE_BOOST,	/* Dynamic Boost System: RapidBoost and IntelligentBoost */
+	PAGE_VIDEOS,	/* the lock screen's video: the phone's videos, one added to ~/Videos */
 };
 
 enum action {
@@ -102,6 +103,7 @@ enum action {
 	ACT_WALL_CAT,		/* arg: the category to open (a folder of photos) */
 	ACT_LIVE_WALL,		/* the picker: the lock screen's photo, a shader or a video (lw_options) */
 	ACT_LIVE_LOOP,		/* the picker: 0 play the video once, 1 loop it */
+	ACT_VIDEO_ADD,		/* arg: found_videos[arg] made the lock screen's video; -1 the still photo */
 	ACT_BT_POWER,
 	ACT_BT_DEVICE,		/* arg: which device: pair, connect or disconnect it */
 	ACT_BT_FORGET,		/* arg: which device */
@@ -1824,6 +1826,148 @@ static double draw_live_wall(cairo_t *cr, double y) {
 	return y;
 }
 
+/* ---- the lock screen's video: adding one ----------------------------------
+ *
+ * Every video on the phone where one would be (~/Videos, ~/Downloads, the
+ * camera's ~/DCIM, ~/Movies, ~/Pictures, memory cards under /run/media and
+ * /media, a folder or two deep); tapped, it is copied into ~/Videos (if it
+ * is not there already) and becomes the lock screen's live wallpaper. */
+#define MAX_FOUND_VIDEOS	48
+static char found_videos[MAX_FOUND_VIDEOS][256];
+static long long found_size[MAX_FOUND_VIDEOS];
+static int n_found_videos = -1;
+static char video_status[160];	/* what the last tap did */
+
+static bool is_video_name(const char *name) {
+	const char *dot = strrchr(name, '.');
+	return dot && name[0] != '.' && (!strcasecmp(dot, ".mp4") || !strcasecmp(dot, ".mkv") ||
+		!strcasecmp(dot, ".webm") || !strcasecmp(dot, ".mov") || !strcasecmp(dot, ".m4v"));
+}
+
+static void found_scan(const char *dir, int depth) {
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	while (d && (e = readdir(d)) && n_found_videos < MAX_FOUND_VIDEOS) {
+		if (e->d_name[0] == '.') continue;
+		char path[512];
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		struct stat st;
+		if (stat(path, &st) != 0) continue;
+		if (S_ISDIR(st.st_mode)) {
+			if (depth > 0) found_scan(path, depth - 1);
+		} else if (S_ISREG(st.st_mode) && is_video_name(e->d_name) && strlen(path) < sizeof(found_videos[0])) {
+			bool seen = false;
+			for (int i = 0; i < n_found_videos; i++) seen = seen || strcmp(found_videos[i], path) == 0;
+			if (seen) continue;
+			snprintf(found_videos[n_found_videos], sizeof(found_videos[0]), "%s", path);
+			found_size[n_found_videos++] = st.st_size;
+		}
+	}
+	if (d) closedir(d);
+}
+
+static void videos_scan(void) {
+	const char *home = getenv("HOME") ? getenv("HOME") : "";
+	static const char *const under_home[] = { "Videos", "Downloads", "DCIM", "Movies", "Pictures" };
+	char dir[512];
+	n_found_videos = 0;
+	for (size_t i = 0; i < sizeof(under_home) / sizeof(under_home[0]); i++) {
+		snprintf(dir, sizeof(dir), "%s/%s", home, under_home[i]);
+		found_scan(dir, 2);
+	}
+	found_scan("/run/media", 3);	/* /run/media/USER/CARD/... */
+	found_scan("/media", 2);
+	found_scan(WALL_ROOT "/live", 0);
+}
+
+/* src into ~/Videos, unless it is there already; the copy's path in out */
+static bool video_import(const char *src, char *out, size_t size) {
+	const char *home = getenv("HOME") ? getenv("HOME") : "";
+	char dir[512];
+	snprintf(dir, sizeof(dir), "%s/Videos", home);
+	size_t n = strlen(dir);
+	if (strncmp(src, dir, n) == 0 && src[n] == '/') {
+		snprintf(out, size, "%s", src);
+		return true;
+	}
+	if (strncmp(src, WALL_ROOT "/", strlen(WALL_ROOT) + 1) == 0) {
+		snprintf(out, size, "%s", src);	/* one ztOS came with: stays where it is */
+		return true;
+	}
+	mkdir(dir, 0755);
+	const char *base = strrchr(src, '/');
+	snprintf(out, size, "%s/%s", dir, base ? base + 1 : src);
+	char tmp[600];
+	snprintf(tmp, sizeof(tmp), "%s.part", out);
+	FILE *in = fopen(src, "rb"), *to = in ? fopen(tmp, "wb") : NULL;
+	bool ok = in && to;
+	char buf[1 << 16];
+	size_t got;
+	while (ok && (got = fread(buf, 1, sizeof(buf), in)) > 0) {
+		ok = fwrite(buf, 1, got, to) == got;
+	}
+	ok = ok && !ferror(in);
+	if (in) fclose(in);
+	if (to && fclose(to) != 0) ok = false;
+	if (ok) ok = rename(tmp, out) == 0;
+	if (!ok) unlink(tmp);
+	return ok;
+}
+
+static double draw_videos(cairo_t *cr) {
+	if (n_found_videos < 0) videos_scan();
+	double y = zmc_header(cr, "lock video");
+	const char *now = app.lock_live == 2 && app.lock_live_video[0] ? strrchr(app.lock_live_video, '/') : NULL;
+	char detail[200];
+	snprintf(detail, sizeof(detail), "Now: %s", now ? now + 1 : app.lock_live == 1 ? "an animated wallpaper" : "the still photo");
+	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+	zmc_text(cr, detail, FONT_REGULAR, 13, MARGIN, y, zmc.width - 2 * MARGIN);
+	y += 24;
+	if (video_status[0]) {
+		zmc_set_rgb(cr, ACCENTS[app.accent].color);
+		zmc_text(cr, video_status, FONT_REGULAR, 13, MARGIN, y, zmc.width - 2 * MARGIN);
+		y += 24;
+	}
+	static const char *const loops[] = { "play once, keep the last frame", "loop" };
+	y = picker(cr, y + 8, "Video playback", loops, 2, app.lock_live_loop, ACT_LIVE_LOOP) + 16;
+	y = zmc_entry(cr, y, "still photo", "no video on the lock screen", ACT_VIDEO_ADD, -1) + 8;
+	if (n_found_videos == 0) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, "No videos found. Copy one to Videos or Downloads.", FONT_REGULAR, 13, MARGIN, y, zmc.width - 2 * MARGIN);
+		return y + 40;
+	}
+	for (int i = 0; i < n_found_videos; i++) {
+		const char *path = found_videos[i], *slash = strrchr(path, '/');
+		char name[96], where[200];
+		snprintf(name, sizeof(name), "%s", slash ? slash + 1 : path);
+		char *dot = strrchr(name, '.');
+		if (dot) *dot = 0;
+		if (strlen(name) > 24) memcpy(name + 21, "...", 4);	/* the row's title, at its size, fits ~24 */
+		const char *home = getenv("HOME") ? getenv("HOME") : "";
+		size_t hn = strlen(home);
+		int dir_len = slash ? (int)(slash - path) : 0;
+		bool chosen = app.lock_live == 2 && strcmp(app.lock_live_video, path) == 0;
+		snprintf(where, sizeof(where), "%s%.*s, %.1f MB%s", hn && !strncmp(path, home, hn) ? "~" : "",
+			hn && !strncmp(path, home, hn) ? dir_len - (int)hn : dir_len, hn && !strncmp(path, home, hn) ? path + hn : path,
+			found_size[i] / 1048576.0, chosen ? ", on the lock screen" : "");
+		y = zmc_entry(cr, y, name, where, ACT_VIDEO_ADD, i);
+		if (chosen) {
+			zmc_set_rgb(cr, ACCENTS[app.accent].color);
+			cairo_rectangle(cr, 0, y - 59, 5, 50);
+			cairo_fill(cr);
+		}
+	}
+	return y + 24;
+}
+
+/* the theme page's row under the photo's: the lock screen's video */
+static double draw_video_row(cairo_t *cr, double y) {
+	const char *now = app.lock_live == 2 && app.lock_live_video[0] ? strrchr(app.lock_live_video, '/') : NULL;
+	char detail[120];
+	snprintf(detail, sizeof(detail), "%s", now ? now + 1 : app.lock_live == 1 ? "animated" : "add a video");
+	return zmc_entry(cr, y, "lock screen video", detail, ACT_OPEN_PAGE, PAGE_VIDEOS) + 24;
+}
+
 /* the whole picker page: targets, then the categories or one of them */
 static double draw_wallpapers(cairo_t *cr) {
 	if (n_walls < 0) walls_scan();
@@ -2046,7 +2190,8 @@ static double draw_theme(cairo_t *cr) {
 	cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
 	zmc_text(cr, "Changing it restarts the shell and closes open apps", FONT_REGULAR, 12, MARGIN, y + 42, zmc.width - 2 * MARGIN);
 	y += 20;
-	return draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
+	y = draw_wall_row(cr, y + 60);	/* under the style row (36 high, 24 below) */
+	return draw_video_row(cr, y);
 }
 
 /* The brightness as it is now, in percent (the shell or sensord may have
@@ -3298,6 +3443,7 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_APN: return draw_apn(cr);
 	case PAGE_WIFI_JOIN: return draw_wifi_join(cr);
 	case PAGE_WIFI_NET: return draw_wifi_net(cr);
+	case PAGE_VIDEOS: return draw_videos(cr);
 	}
 	return 0;
 }
@@ -3434,6 +3580,10 @@ static void activate(int action, int arg) {
 		if (arg == PAGE_INSTALLED_APPS) installed_load();
 		if (arg == PAGE_MAIN || arg == PAGE_APPS) {
 			hub_tab = arg;	/* where back returns to from a page under it */
+		}
+		if (arg == PAGE_VIDEOS) {
+			videos_scan();	/* what is on the phone now */
+			video_status[0] = 0;
 		}
 		if (arg == PAGE_WALLS) {
 			wall_cat_open = -1;	/* opens on the categories */
@@ -3824,6 +3974,26 @@ static void activate(int action, int arg) {
 		app.lock_live_loop = arg == 1;
 		config_save();
 		break;
+	case ACT_VIDEO_ADD:
+		if (arg < 0) {
+			app.lock_live = 0;
+			snprintf(video_status, sizeof(video_status), "The lock screen shows its photo.");
+		} else if (arg < n_found_videos) {
+			char to[256];
+			if (video_import(found_videos[arg], to, sizeof(to))) {
+				app.lock_live = 2;
+				snprintf(app.lock_live_video, sizeof(app.lock_live_video), "%s", to);
+				const char *slash = strrchr(to, '/');
+				snprintf(video_status, sizeof(video_status), "Added: %s. Lock the phone to see it.", slash ? slash + 1 : to);
+				videos_scan();	/* the copy in Videos is a row now */
+				n_lw_videos = -1;	/* and a choice in the background page's list */
+			} else {
+				snprintf(video_status, sizeof(video_status), "Could not copy it to Videos: %s", strerror(errno));
+				break;
+			}
+		}
+		config_save();
+		break;
 	case ACT_LIVE_WALL:
 		/* the shell reads it on SIGHUP: the lock screen's next frame is it */
 		if (arg <= 0) {
@@ -4140,8 +4310,8 @@ static bool back(void) {
 		zmc_go(PAGE_WIFI, -1);
 		return true;
 	}
-	if (zmc.page == PAGE_ACCENTS) {
-		zmc_go(PAGE_THEME, -1);	/* the picker is under the theme page */
+	if (zmc.page == PAGE_ACCENTS || zmc.page == PAGE_VIDEOS) {
+		zmc_go(PAGE_THEME, -1);	/* the pickers are under the theme page */
 		return true;
 	}
 	if (zmc.page == PAGE_WALLS) {
@@ -4227,7 +4397,7 @@ static const struct zmc_app settings = {
  * That is how the look is checked without opening the app on the phone. */
 /* Pages by name: --render PAGE, and `ztsettings PAGE` (Hyperscan opens one). */
 static const struct { const char *name; enum page page; } pages[] = {
-	{ "date", PAGE_DATE }, { "main", PAGE_MAIN }, { "apps", PAGE_APPS }, { "installed-apps", PAGE_INSTALLED_APPS }, { "theme", PAGE_THEME }, { "accents", PAGE_ACCENTS }, { "wallpapers", PAGE_WALLS }, { "display", PAGE_DISPLAY },
+	{ "date", PAGE_DATE }, { "main", PAGE_MAIN }, { "apps", PAGE_APPS }, { "installed-apps", PAGE_INSTALLED_APPS }, { "theme", PAGE_THEME }, { "accents", PAGE_ACCENTS }, { "wallpapers", PAGE_WALLS }, { "videos", PAGE_VIDEOS }, { "display", PAGE_DISPLAY },
 	{ "wifi", PAGE_WIFI }, { "bluetooth", PAGE_BLUETOOTH }, { "mobile", PAGE_MOBILE }, { "audio", PAGE_AUDIO },
 	{ "battery", PAGE_BATTERY }, { "cpu", PAGE_CPU }, { "vm", PAGE_VM },
 	{ "gpu", PAGE_GPU }, { "keyboard", PAGE_KEYBOARD }, { "about", PAGE_ABOUT },
