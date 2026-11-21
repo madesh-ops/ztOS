@@ -2015,7 +2015,10 @@ int main(int argc, char **argv) {
 		if (dial_arg < -1 || dial_arg >= N_CONTROLS) return 2;
 		return render_png(out_png, dial_arg);
 	}
-	if (!device_path && !replay_path && access("/dev/video0", R_OK | W_OK) == 0) {
+	/* the RAW driver first: on the Galaxy M20, /dev/video0 is the MFC video
+	 * decoder, which opens but is no camera */
+	if (!device_path && !replay_path && access(RAW_DEV, F_OK) != 0 &&
+			access("/dev/video0", R_OK | W_OK) == 0) {
 		device_path = "/dev/video0";
 	}
 	int status = zmc_run(&camera, 0);
