@@ -8,3 +8,4 @@ obj-m += scsc-wlan/
 CFLAGS_zrn-wlbt.o += -I$(src)/scsc-wlan/include
 obj-m += scsc-bt/
 obj-m += abox/
+obj-m += zrn-m20cam.o
