@@ -25,6 +25,8 @@ cp -a "$DEVROOT/os/overlay-m20lte/." "$R/"
 # networkd also took wlan0 and p2p0, and p2p0 never came up: wait-online held
 # network-online.target (and everything after it) for two minutes a boot
 rm -f "$R/etc/systemd/network/20-wlan.network"
+# GSettings defaults from the overlay (Celluloid on the MFC decoder)
+ch glib-compile-schemas /usr/share/glib-2.0/schemas > /dev/null 2>&1 || true
 # git keeps no mode for these, and sudo ignores a sudoers file that is not 0440
 chmod 440 "$R/etc/sudoers.d/10-proxy"
 # The panel is the bootloader's and has no kernel driver: dsi.py talks to

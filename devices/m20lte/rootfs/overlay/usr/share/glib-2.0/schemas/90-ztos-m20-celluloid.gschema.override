@@ -1,0 +1,4 @@
+# Celluloid does not read /etc/mpv/mpv.conf: the M20's MFC decoder (see there)
+# as its default extra mpv options
+[io.github.celluloid-player.Celluloid]
+mpv-options='--hwdec=v4l2m2m-copy --vd-lavc-o=num_capture_buffers=32'
