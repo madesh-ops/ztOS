@@ -96,7 +96,7 @@ try:
 
     say("D: settle %d, 4 lanes, ch0 RAW10 %dx%d" % (SETTLE, W, H))
     d = rd(csis, 0x704)                              # PHY_CMN_CTRL (v5.0 layout)
-    d = (d & ~(0xff << 24) & ~(0xff << 16) & ~(0xf << 1)) | (SETTLE << 24) | (1 << 16) | (0xf << 1)
+    d = (d & ~(0xff << 24) & ~(0xff << 16) & ~(0xf << 1)) | (SETTLE << 24) | (1 << 16) | (1 << 7) | (0xf << 1)  # bit 7 S_BYTE_CLK_ENABLE: always on the 7885 (csi_hw_s_lane, v5.0)
     wr(csis, 0x704, d)
     c = rd(csis, 0x04)
     c = (c & ~(3 << 8) & ~(1 << 12) & ~(3 << 10)) | (3 << 8)

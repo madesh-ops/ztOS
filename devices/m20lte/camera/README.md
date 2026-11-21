@@ -59,6 +59,26 @@ from user space (GPIO character device, `/dev/mem`); nothing in the kernel yet.
   the sensor's extra data types are next to check, with a frame in memory.
   No freeze in any run; everything is undone after each.
 
+- 2026-11-21: **first frame in memory** (`csis-capture.py`, picture
+  `first-frame-colour-bars.png`, the sensor's colour bars). What it took, on top of
+  `csis-count.py`:
+  - PHY_CMN_CTRL bit 7 (S_BYTE_CLK_ENABLE), which Samsung's v5.0 driver always sets
+    on the 7885 (`csi_hw_s_lane`): without it every frame had ERR_ECC and
+    ERR_LOST_FE; with it INT_SRC0 is 0x01100000 (frame start + end), INT_SRC1 0.
+    The M20's receiver is driven by `fimc-is-hw-csi-v5_0.c` (it has 7885 branches).
+  - The CSIS-DMA common block at 0x14440000 (fimc_is reg 0): it boots with
+    IP_PROCESSING 0 and SRAM split 0, and the channel aborts (ACT_CTRL bit 16).
+    For CSIS1 alone (`csi_hw_s_dma_common_dynamic`, "DMA1 only"): ARB 2, CTRL |= 2,
+    SRAM_SPLIT (320 << 16) | 4, MATRIX 0.
+  - DMA0 of CSIS1: FMT 0 (2D, unpacked, legacy, RAW10), RESOL 1052, DMA_DATA_CTRL
+    1, eight addresses, CTRL 0x3: on the 7885 DMA_N_DISABLE = 1 means enabled.
+  - Result: DMA_SRC 0x111 each frame, 780 lines of 2112 bytes (1052 pixels, 16
+    bits each, 10 bits low, padded to 2112), black 64, white 1023, Bayer **GRBG**.
+  - The camera SysMMU (0x14540000) is secure: one read of it was an SError and a
+    reboot. Its DMA is not translated (the frame lands at the physical address).
+  - A scene with the default 120 fps exposure: all at black (64-65); exposure
+    and gain are next.
+
 ## Next
 
 1. Front and rear-wide IDs (same steps, their supplies and pins).
