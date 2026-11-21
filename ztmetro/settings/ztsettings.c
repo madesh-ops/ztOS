@@ -100,6 +100,8 @@ enum action {
 	ACT_WALL,		/* arg: 0 none, else the photo walls[arg - 1] */
 	ACT_WALL_TARGET,	/* arg: 0 start and lock, 1 start, 2 lock */
 	ACT_WALL_CAT,		/* arg: the category to open (a folder of photos) */
+	ACT_LIVE_WALL,		/* the picker: the lock screen's photo, a shader or a video (lw_options) */
+	ACT_LIVE_LOOP,		/* the picker: 0 play the video once, 1 loop it */
 	ACT_BT_POWER,
 	ACT_BT_DEVICE,		/* arg: which device: pair, connect or disconnect it */
 	ACT_BT_FORGET,		/* arg: which device */
@@ -221,6 +223,10 @@ static struct {
 	int palette;		/* dotmatrix_palette */
 	char start_wall[256], lock_wall[256];	/* the photos, or "" */
 	int wall_target;			/* 0 both, 1 Start, 2 lock screen */
+	/* the lock screen's live wallpaper: 0 the photo, 1 a shader, 2 a video */
+	int lock_live, lock_live_shader;
+	bool lock_live_loop;			/* the video looped, or played once to its last frame */
+	char lock_live_video[256];
 	int columns;
 	int style;				/* ztRetrofit's look: 0 Metro, 1 DotMatrix */
 	bool haptics;
@@ -428,6 +434,14 @@ static void config_load(void) {
 			snprintf(app.start_wall, sizeof(app.start_wall), "%s", val);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
 			snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", val);
+		} else if (strcmp(key, "lock_live") == 0) {
+			app.lock_live = strcmp(val, "shader") == 0 ? 1 : strcmp(val, "video") == 0 ? 2 : 0;
+		} else if (strcmp(key, "lock_live_shader") == 0) {
+			app.lock_live_shader = strcmp(val, "waves") == 0 ? 1 : 0;
+		} else if (strcmp(key, "lock_live_loop") == 0) {
+			app.lock_live_loop = strcmp(val, "on") == 0;
+		} else if (strcmp(key, "lock_live_video") == 0) {
+			snprintf(app.lock_live_video, sizeof(app.lock_live_video), "%s", val);
 		} else if (strcmp(key, "nav_center_icon") == 0) {
 			int n = atoi(val); app.nav_icon_idx = n < 0 ? 0 : n > 4 ? 4 : n;
 		} else if (strcmp(key, "android_icons") == 0) {
@@ -633,7 +647,7 @@ static void auto_load(void) {
 
 static void config_save(void) {
 	static const int timeouts[] = { 30, 60, 180, 300, 0 };
-	enum { N_KEYS = 24 + N_HAPTIC_GROUPS };
+	enum { N_KEYS = 28 + N_HAPTIC_GROUPS };
 	struct { const char *key; char value[300]; bool written; } keys[N_KEYS] = {
 		{ .key = "accent" }, { .key = "columns" }, { .key = "haptics" },
 		{ .key = "brightness" }, { .key = "timeout" }, { .key = "demo_tiles" },
@@ -673,6 +687,15 @@ static void config_save(void) {
 	static const char *const android_icon_keys[] = { "themed", "circle", "box" };
 	keys[23 + N_HAPTIC_GROUPS].key = "android_icons";
 	snprintf(keys[23 + N_HAPTIC_GROUPS].value, 32, "%s", android_icon_keys[app.android_icons]);
+	static const char *const live_modes[] = { "off", "shader", "video" };
+	keys[24 + N_HAPTIC_GROUPS].key = "lock_live";
+	snprintf(keys[24 + N_HAPTIC_GROUPS].value, 32, "%s", live_modes[app.lock_live]);
+	keys[25 + N_HAPTIC_GROUPS].key = "lock_live_shader";
+	snprintf(keys[25 + N_HAPTIC_GROUPS].value, 32, "%s", app.lock_live_shader ? "waves" : "aurora");
+	keys[26 + N_HAPTIC_GROUPS].key = "lock_live_video";
+	snprintf(keys[26 + N_HAPTIC_GROUPS].value, sizeof(keys[0].value), "%s", app.lock_live_video);
+	keys[27 + N_HAPTIC_GROUPS].key = "lock_live_loop";
+	snprintf(keys[27 + N_HAPTIC_GROUPS].value, 32, "%s", app.lock_live_loop ? "on" : "off");
 	snprintf(keys[0].value, 32, "%s", ACCENTS[app.accent].name);
 	snprintf(keys[1].value, 32, "%d", app.columns);
 	snprintf(keys[2].value, 32, "%s", app.haptics ? "on" : "off");
@@ -1732,12 +1755,82 @@ static double draw_wall_grid(cairo_t *cr, double y) {
 	return y + ((count + 1 + 2) / 3) * (th + gap);
 }
 
+/* The lock screen's live wallpaper, a list picker: the photo, the shell's
+ * two shaders, then the videos in the shipped folder, and the user's own
+ * in ~/Videos and ~/Downloads (a video copied there is a choice). */
+#define LW_MAX_VIDEOS	16
+static char lw_videos[LW_MAX_VIDEOS][256];
+static char lw_labels[3 + LW_MAX_VIDEOS][80];
+static int n_lw_videos = -1;
+
+static void lw_scan_dir(const char *dir) {
+	DIR *d = opendir(dir);
+	struct dirent *e;
+	while (d && (e = readdir(d)) && n_lw_videos < LW_MAX_VIDEOS) {
+		const char *dot = strrchr(e->d_name, '.');
+		if (e->d_name[0] == '.' || !dot) continue;
+		if (strcasecmp(dot, ".mp4") && strcasecmp(dot, ".mkv") && strcasecmp(dot, ".webm") &&
+				strcasecmp(dot, ".mov") && strcasecmp(dot, ".m4v")) continue;
+		snprintf(lw_videos[n_lw_videos], sizeof(lw_videos[0]), "%s/%s", dir, e->d_name);
+		snprintf(lw_labels[3 + n_lw_videos], sizeof(lw_labels[0]), "video: %.*s", (int)(dot - e->d_name), e->d_name);
+		n_lw_videos++;
+	}
+	if (d) closedir(d);
+}
+
+static void lw_scan(void) {
+	n_lw_videos = 0;
+	snprintf(lw_labels[0], sizeof(lw_labels[0]), "still photo");
+	snprintf(lw_labels[1], sizeof(lw_labels[0]), "aurora (animated)");
+	snprintf(lw_labels[2], sizeof(lw_labels[0]), "waves (animated)");
+	lw_scan_dir(WALL_ROOT "/live");
+	char dir[512];
+	snprintf(dir, sizeof(dir), "%s/Videos", getenv("HOME") ? getenv("HOME") : "");
+	lw_scan_dir(dir);
+	snprintf(dir, sizeof(dir), "%s/Downloads", getenv("HOME") ? getenv("HOME") : "");
+	lw_scan_dir(dir);
+	/* the one chosen, wherever it is */
+	if (app.lock_live_video[0] && n_lw_videos < LW_MAX_VIDEOS) {
+		bool found = false;
+		for (int i = 0; i < n_lw_videos; i++) found = found || strcmp(lw_videos[i], app.lock_live_video) == 0;
+		if (!found) {
+			const char *slash = strrchr(app.lock_live_video, '/');
+			snprintf(lw_videos[n_lw_videos], sizeof(lw_videos[0]), "%s", app.lock_live_video);
+			snprintf(lw_labels[3 + n_lw_videos], sizeof(lw_labels[0]), "video: %s", slash ? slash + 1 : app.lock_live_video);
+			n_lw_videos++;
+		}
+	}
+}
+
+static double draw_live_wall(cairo_t *cr, double y) {
+	if (n_lw_videos < 0) lw_scan();
+	const char *options[3 + LW_MAX_VIDEOS];
+	for (int i = 0; i < 3 + n_lw_videos; i++) options[i] = lw_labels[i];
+	int selected = 0;
+	if (app.lock_live == 1) selected = 1 + app.lock_live_shader;
+	for (int i = 0; app.lock_live == 2 && i < n_lw_videos; i++) {
+		if (strcmp(lw_videos[i], app.lock_live_video) == 0) selected = 3 + i;
+	}
+	y = picker(cr, y, "Lock screen wallpaper", options, 3 + n_lw_videos, selected, ACT_LIVE_WALL) + 8;
+	if (app.lock_live == 2) {
+		static const char *const loops[] = { "play once, keep the last frame", "loop" };
+		y = picker(cr, y, "Video playback", loops, 2, app.lock_live_loop, ACT_LIVE_LOOP) + 8;
+	}
+	if (n_lw_videos == 0 || app.lock_live == 2) {
+		cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
+		zmc_text(cr, "Your own videos: copy them to Videos or Downloads.", FONT_REGULAR, 13, MARGIN, y, 0);
+		y += 28;
+	}
+	return y;
+}
+
 /* the whole picker page: targets, then the categories or one of them */
 static double draw_wallpapers(cairo_t *cr) {
 	if (n_walls < 0) walls_scan();
 	double y = zmc_header(cr, wall_cat_open >= 0 ? cat_name[wall_cat_open] : "background");
 	y = draw_wall_targets(cr, y);
 	if (wall_cat_open < 0) {
+		if (app.wall_target != 1) y = draw_live_wall(cr, y);
 		y = draw_wall_categories(cr, y);
 		if (n_cats == 0) {
 			cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
@@ -3216,6 +3309,7 @@ static bool is_picker(int action) {
 	case ACT_RINGTONE: case ACT_VIBE_PATTERN:
 	case ACT_TICKLE_BATTERY: case ACT_TICKLE_CHARGING: case ACT_TICKLE_SAVER:
 	case ACT_DEV_MENU_SPEED: case ACT_APN_AUTH: case ACT_DATE_REGION: case ACT_DATE_LANG:
+	case ACT_LIVE_WALL: case ACT_LIVE_LOOP:
 		return true;
 	}
 	return action >= ACT_QUICK_SLOT && action <= ACT_QUICK_LAST;
@@ -3403,7 +3497,10 @@ static void activate(int action, int arg) {
 	case ACT_WALL: {
 		const char *path = arg > 0 && arg <= n_walls ? walls[arg - 1] : "";
 		if (app.wall_target != 2) snprintf(app.start_wall, sizeof(app.start_wall), "%s", path);
-		if (app.wall_target != 1) snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", path);
+		if (app.wall_target != 1) {
+			snprintf(app.lock_wall, sizeof(app.lock_wall), "%s", path);
+			app.lock_live = 0;	/* a photo chosen for it: the photo, not the live one */
+		}
 		config_save();
 		break;
 	}
@@ -3721,6 +3818,23 @@ static void activate(int action, int arg) {
 		break;
 	case ACT_ANDROID_ICONS:
 		app.android_icons = arg < 0 ? 0 : arg > 2 ? 2 : arg;
+		config_save();
+		break;
+	case ACT_LIVE_LOOP:
+		app.lock_live_loop = arg == 1;
+		config_save();
+		break;
+	case ACT_LIVE_WALL:
+		/* the shell reads it on SIGHUP: the lock screen's next frame is it */
+		if (arg <= 0) {
+			app.lock_live = 0;
+		} else if (arg <= 2) {
+			app.lock_live = 1;
+			app.lock_live_shader = arg - 1;
+		} else if (arg - 3 < n_lw_videos) {
+			app.lock_live = 2;
+			snprintf(app.lock_live_video, sizeof(app.lock_live_video), "%s", lw_videos[arg - 3]);
+		}
 		config_save();
 		break;
 	case ACT_MOBILE_DATA:

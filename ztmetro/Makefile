@@ -200,6 +200,7 @@ install: check-arch
 	install -Dm755 auth/ztos-polkit-agent /usr/local/bin/ztos-polkit-agent
 	install -Dm755 sounds/ztos-sounds /usr/local/bin/ztos-sounds
 	install -Dm755 ztmetro /usr/local/bin/ztmetro
+	install -Dm755 lockwall/ztos-live-decode /usr/local/libexec/ztos-live-decode
 	install -Dm755 ztmetro-session /usr/local/bin/ztmetro-session
 	install -Dm755 splash/ztos-splash /usr/local/bin/ztos-splash
 	install -Dm755 apps/ztapps /usr/local/bin/ztapps

@@ -54,6 +54,7 @@
 #include <drm_fourcc.h>
 #include <xf86drm.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
@@ -266,6 +267,11 @@ static int nav_h = NAV_BAR_H;
 enum tile_size { TILE_SMALL, TILE_MEDIUM, TILE_WIDE };
 
 /* Something the shell drew, as a texture. */
+/* the lock screen's live wallpaper (config lock_live) */
+enum { LIVE_OFF, LIVE_SHADER, LIVE_VIDEO };
+#define LIVE_SHADERS 2
+static const char *const live_shader_names[LIVE_SHADERS] = { "aurora", "waves" };
+
 struct zt_layer {
 	GLuint tex;
 	int pw, ph;		/* pixels drawn */
@@ -598,6 +604,31 @@ struct zt_server {
 	struct zt_layer wall_layer;
 	double wall_h;			/* points: the start photo's height */
 	cairo_surface_t *lock_wall;
+	/* the lock screen's live wallpaper (config lock_live, see "live
+	 * wallpaper" below): a shader, or a looping video from a decoder
+	 * process, drawn under the lock layer, which then has no photo */
+	int lw_mode;			/* LIVE_OFF, LIVE_SHADER, LIVE_VIDEO */
+	int lw_shader;		/* which of live_shader_names[] */
+	char lw_video[256];
+	int lw_fps;			/* the cap, frames a second */
+	bool lw_loop;			/* lock_live_loop: loop the video, or play it once and keep its last frame */
+	bool lw_ended;			/* played once: its last frame stays until the lock screen is next shown */
+	struct wl_event_source *lw_timer, *lw_source;
+	bool lw_running;		/* ticking: the lock screen is being looked at */
+	pid_t lw_pid;			/* the decoder, 0 none */
+	int lw_fd;			/* its frames, -1 none */
+	char lw_hdr[64];		/* the decoder's header: its frames' size and colour matrix */
+	int lw_hdr_got;
+	int lw_matrix;			/* 601 or 709 */
+	unsigned char *lw_buf;	/* one yuv420p frame */
+	size_t lw_len, lw_got, lw_cap;	/* a frame's bytes (0 before the header), read, the buffer's */
+	int lw_w, lw_h;		/* the decoder's frames */
+	bool lw_due;			/* the tick says the next frame may go up */
+	bool lw_have;			/* the textures hold a frame */
+	GLuint lw_prog[3], lw_tex[3];	/* [0] video (yuv), [1..] the shaders */
+	int lw_tw, lw_th;		/* the Y texture, padded */
+	uint32_t lw_paused_ms, lw_retry_ms;
+	int lw_fails;
 	bool locked;
 	bool call_over_lock;	/* only the phone call may cover the lock */
 	/* app switcher: the apps as a row of cards, newest on the right */
@@ -3068,6 +3099,11 @@ static void load_config(struct zt_server *server) {
 		"%s", "/usr/local/share/backgrounds/ztos/Lumia Cyan/Background_01.jpg");
 	snprintf(server->lock_wall_path, sizeof(server->lock_wall_path),
 		"%s", "/usr/local/share/backgrounds/ztos/Lumia Cyan lock screens/Wallpaper_01.jpg");
+	server->lw_mode = LIVE_OFF;
+	server->lw_shader = 0;
+	server->lw_video[0] = 0;
+	server->lw_fps = 24;
+	server->lw_loop = false;
 	server->haptics_enabled = true;
 	server->haptic_strength = 80;
 	for (int i = 0; i < 8; i++) {
@@ -3112,6 +3148,21 @@ static void load_config(struct zt_server *server) {
 			snprintf(server->start_wall_path, sizeof(server->start_wall_path), "%s", value);
 		} else if (strcmp(key, "lock_wallpaper") == 0) {
 			snprintf(server->lock_wall_path, sizeof(server->lock_wall_path), "%s", value);
+		} else if (strcmp(key, "lock_live") == 0) {
+			server->lw_mode = strcmp(value, "shader") == 0 ? LIVE_SHADER :
+				strcmp(value, "video") == 0 ? LIVE_VIDEO : LIVE_OFF;
+		} else if (strcmp(key, "lock_live_shader") == 0) {
+			server->lw_shader = 0;
+			for (int i = 0; i < LIVE_SHADERS; i++) {
+				if (strcmp(value, live_shader_names[i]) == 0) server->lw_shader = i;
+			}
+		} else if (strcmp(key, "lock_live_video") == 0) {
+			snprintf(server->lw_video, sizeof(server->lw_video), "%s", value);
+		} else if (strcmp(key, "lock_live_loop") == 0) {
+			server->lw_loop = strcmp(value, "on") == 0;
+		} else if (strcmp(key, "lock_live_fps") == 0) {
+			int n = atoi(value);
+			server->lw_fps = n < 5 ? 5 : n > 30 ? 30 : n;
 		} else if (strcmp(key, "nav_bar") == 0) {
 			if (strcmp(value, "on") == 0) {
 				nav_h = NAV_BAR_H;
@@ -6362,6 +6413,482 @@ static void lock_notes_changed(struct zt_server *server) {
 	damage(server);
 }
 
+static void child_priority(void);
+static void close_inherited(void);
+
+/* ---- the lock screen's live wallpaper ----------------------------------------
+ *
+ * Config lock_live = off | shader | video. A shader (lock_live_shader, one of
+ * live_shader_names[]) is drawn straight to the screen; a video
+ * (lock_live_video, any file ffmpeg reads) is decoded by a process of its own,
+ * ztos-live-decode, as raw yuv420p frames of the video's own size down a
+ * pipe, and the shader below crops them to cover the screen and turns them
+ * to RGB. Either is drawn under the lock layer, which then has no photo of
+ * its own (draw_lock).
+ *
+ * A video is played once each time the lock screen is shown and then stays
+ * on its last frame (lock_live_loop = off, the default), or looped (on).
+ *
+ * It costs power only while it is looked at: a timer at lock_live_fps (24,
+ * 5 to 30) draws the next frame while the lock screen is on a lit screen;
+ * otherwise the timer stops, and the decoder, blocked on its full pipe (read
+ * only when a frame is due), uses nothing. Played once, it is killed then,
+ * to start again from the beginning when the lock screen is next shown;
+ * looped, after five minutes. (Not SIGSTOPped: a stopped decoder outlived a
+ * shell that went away, never seeing its broken pipe.) The last frame stays
+ * in the textures meanwhile. */
+#define LW_REAP_MS	(5 * 60 * 1000)
+#define LW_DECODER	"/usr/local/libexec/ztos-live-decode"
+
+static bool lw_wanted(struct zt_server *server) {
+	return server->lw_mode != LIVE_OFF && server->screen_on && server->width > 0 &&
+		!retro_on(server) && server->lock_layer.tex &&
+		(server->locked || server->lock_y > 1.0f - server->height) &&
+		!(server->call_over_lock && server->shown);
+}
+
+/* the lock layer is drawn without its photo: something is under it */
+static bool lw_active(struct zt_server *server) {
+	return server->lw_mode != LIVE_OFF && !retro_on(server) &&
+		(server->lw_mode == LIVE_SHADER || server->lw_video[0]);
+}
+
+static void lw_decoder_stop(struct zt_server *server) {
+	if (server->lw_source) {
+		wl_event_source_remove(server->lw_source);
+		server->lw_source = NULL;
+	}
+	if (server->lw_fd >= 0) {
+		close(server->lw_fd);
+		server->lw_fd = -1;
+	}
+	if (server->lw_pid > 0) {
+		kill(-server->lw_pid, SIGKILL);	/* its group: the script and its ffmpeg (SIGCHLD is ignored: reaped) */
+		server->lw_pid = 0;
+	}
+	server->lw_got = 0;
+	server->lw_len = 0;
+	server->lw_hdr_got = 0;
+}
+
+/* "ZTLW1 <width> <height> <601|709>", spaces, a newline: 64 bytes */
+static bool lw_header(struct zt_server *server) {
+	int w = 0, h = 0, matrix = 601;
+	server->lw_hdr[sizeof(server->lw_hdr) - 1] = 0;
+	if (sscanf(server->lw_hdr, "ZTLW1 %d %d %d", &w, &h, &matrix) < 2 || w < 2 || h < 2 ||
+			w > 4096 || h > 4096 || (w | h) & 1) {
+		wlr_log(WLR_ERROR, "live wallpaper: the decoder's header is wrong: '%.40s'", server->lw_hdr);
+		return false;
+	}
+	size_t len = (size_t)w * h * 3 / 2;
+	if (len > server->lw_cap) {
+		free(server->lw_buf);
+		server->lw_buf = malloc(len);
+		server->lw_cap = server->lw_buf ? len : 0;
+		if (!server->lw_buf) return false;
+	}
+	server->lw_w = w;
+	server->lw_h = h;
+	server->lw_matrix = matrix;
+	server->lw_len = len;
+	wlr_log(WLR_INFO, "live wallpaper: frames of %dx%d, BT.%d", w, h, matrix);
+	return true;
+}
+
+static int lw_readable(int fd, uint32_t mask, void *data) {
+	struct zt_server *server = data;
+	while (server->lw_hdr_got < (int)sizeof(server->lw_hdr)) {
+		ssize_t n = read(fd, server->lw_hdr + server->lw_hdr_got, sizeof(server->lw_hdr) - server->lw_hdr_got);
+		if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+			return 0;
+		}
+		if (n <= 0) {
+			break;	/* gone before its header: below */
+		}
+		server->lw_hdr_got += (int)n;
+		if (server->lw_hdr_got == (int)sizeof(server->lw_hdr) && !lw_header(server)) {
+			lw_decoder_stop(server);
+			server->lw_fails++;
+			server->lw_retry_ms = now_ms() + 60000;
+			return 0;
+		}
+	}
+	while (!server->lw_len || server->lw_got < server->lw_len) {
+		if (!server->lw_len) {
+			/* the decoder ended before its header: it could not read the file */
+			wlr_log(WLR_ERROR, "live wallpaper: the decoder would not play %s", server->lw_video);
+			lw_decoder_stop(server);
+			server->lw_fails++;
+			server->lw_retry_ms = now_ms() + (server->lw_fails < 3 ? 2000 : 60000);
+			return 0;
+		}
+		ssize_t n = read(fd, server->lw_buf + server->lw_got, server->lw_len - server->lw_got);
+		if (n > 0) {
+			server->lw_got += (size_t)n;
+			continue;
+		}
+		if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+			return 0;
+		}
+		if (n == 0 && server->lw_got == 0 && !server->lw_loop) {
+			/* played to its end: its last frame is in the textures */
+			lw_decoder_stop(server);
+			server->lw_ended = true;
+			server->lw_fails = 0;
+			wlr_log(WLR_INFO, "live wallpaper: the video ended; its last frame stays");
+			return 0;
+		}
+		/* the decoder is gone: the file would not play, or it died */
+		wlr_log(WLR_ERROR, "live wallpaper: the decoder stopped (%s)", n == 0 ? "end of its frames" : strerror(errno));
+		lw_decoder_stop(server);
+		server->lw_fails++;
+		server->lw_retry_ms = now_ms() + (server->lw_fails < 3 ? 2000 : 60000);
+		return 0;
+	}
+	/* a whole frame: nothing more is read until it has gone up (lw_draw),
+	 * so the decoder waits on the full pipe and runs at the tick's pace */
+	wl_event_source_fd_update(server->lw_source, 0);
+	if (server->lw_due) {
+		damage(server);
+	}
+	return 0;
+}
+
+static void lw_decoder_start(struct zt_server *server) {
+	if (!server->lw_video[0] || server->lw_pid > 0) {
+		return;
+	}
+	if (server->lw_retry_ms && (int32_t)(now_ms() - server->lw_retry_ms) < 0) {
+		return;
+	}
+	int fds[2];
+	if (pipe2(fds, O_CLOEXEC) < 0) {
+		return;
+	}
+	char sfps[16];
+	snprintf(sfps, sizeof(sfps), "%d", server->lw_fps);
+	pid_t pid = fork();
+	if (pid == 0) {
+		sigset_t none;
+		sigemptyset(&none);
+		sigprocmask(SIG_SETMASK, &none, NULL);	/* the shell's are blocked for its signalfd */
+		setsid();	/* a process group of its own, killed together */
+		signal(SIGCHLD, SIG_DFL);
+		signal(SIGPIPE, SIG_DFL);
+		prctl(PR_SET_PDEATHSIG, SIGKILL);
+		child_priority();
+		if (setpriority(PRIO_PROCESS, 0, 10) < 0) {}
+		dup2(fds[1], 1);
+		int null = open("/dev/null", O_RDONLY);
+		if (null >= 0) dup2(null, 0);
+		close_inherited();
+		execl(LW_DECODER, LW_DECODER, sfps, server->lw_video,
+			server->lw_loop ? "loop" : "once", (char *)NULL);
+		_exit(127);
+	}
+	close(fds[1]);
+	if (pid < 0) {
+		close(fds[0]);
+		return;
+	}
+	fcntl(fds[0], F_SETFL, O_NONBLOCK);
+	fcntl(fds[0], F_SETPIPE_SZ, 1 << 20);	/* a frame at a time, if the system allows */
+	server->lw_pid = pid;
+	server->lw_fd = fds[0];
+	server->lw_got = 0;
+	server->lw_len = 0;
+	server->lw_hdr_got = 0;
+	server->lw_source = wl_event_loop_add_fd(server->loop, fds[0], WL_EVENT_READABLE, lw_readable, server);
+	wlr_log(WLR_INFO, "live wallpaper: decoding %s, %d fps, %s (pid %d)", server->lw_video,
+		server->lw_fps, server->lw_loop ? "looped" : "once", pid);
+}
+
+static void lw_pause(struct zt_server *server) {
+	server->lw_running = false;
+	server->lw_due = false;
+	server->lw_paused_ms = now_ms();
+	server->lw_ended = false;	/* shown again, it plays again */
+	if (!server->lw_loop) {
+		lw_decoder_stop(server);	/* from its beginning next time */
+	}
+	if (server->lw_timer) {
+		wl_event_source_timer_update(server->lw_timer, server->lw_pid > 0 ? LW_REAP_MS : 0);
+	}
+}
+
+static int lw_tick(void *data) {
+	struct zt_server *server = data;
+	if (!lw_wanted(server)) {
+		if (server->lw_running) {
+			lw_pause(server);
+		} else if (server->lw_pid > 0) {
+			wlr_log(WLR_INFO, "live wallpaper: unseen for a while, the decoder is let go");
+			lw_decoder_stop(server);
+		}
+		return 0;
+	}
+	wl_event_source_timer_update(server->lw_timer, 1000 / (server->lw_fps > 0 ? server->lw_fps : 24));
+	if (server->lw_mode == LIVE_SHADER) {
+		damage(server);
+		return 0;
+	}
+	if (server->lw_ended) {
+		/* nothing to draw: only watch for the lock screen going */
+		wl_event_source_timer_update(server->lw_timer, 500);
+		return 0;
+	}
+	if (server->lw_pid <= 0) {
+		lw_decoder_start(server);
+	}
+	server->lw_due = true;
+	if (server->lw_pid > 0 && server->lw_len && server->lw_got >= server->lw_len) {
+		damage(server);	/* a frame is waiting */
+	}
+	return 0;
+}
+
+/* Each frame, before drawing: start ticking if the lock screen has just come
+ * into view (on a screen just lit, or locked). */
+static void lw_sync(struct zt_server *server) {
+	if (!server->lw_running && server->lw_timer && lw_wanted(server)) {
+		server->lw_running = true;
+		wl_event_source_timer_update(server->lw_timer, 1);
+	}
+}
+
+/* The settings changed: what is playing may not be what is chosen. */
+static void lw_reconfigure(struct zt_server *server, int mode, int shader, const char *video, int fps,
+		bool loop) {
+	if (mode == server->lw_mode && shader == server->lw_shader && fps == server->lw_fps &&
+			loop == server->lw_loop && strcmp(video, server->lw_video) == 0) {
+		return;
+	}
+	lw_decoder_stop(server);
+	server->lw_ended = false;
+	server->lw_have = false;
+	server->lw_fails = 0;
+	server->lw_retry_ms = 0;
+	if (server->lw_running) {
+		server->lw_running = false;
+		if (server->lw_timer) wl_event_source_timer_update(server->lw_timer, 0);
+	}
+	wlr_log(WLR_INFO, "live wallpaper: %s", server->lw_mode == LIVE_OFF ? "off" :
+		server->lw_mode == LIVE_SHADER ? live_shader_names[server->lw_shader] : server->lw_video);
+}
+
+static GLuint lw_compile(const char *fragment) {
+	static const char *vertex =
+		"attribute vec2 pos;\n"
+		"uniform mat4 mvp;\n"
+		"uniform vec2 uv_scale;\n"
+		"uniform vec2 uv_off;\n"
+		"varying vec2 uv;\n"
+		"void main() {\n"
+		"	uv = uv_off + pos * uv_scale;\n"
+		"	gl_Position = mvp * vec4(pos, 0.0, 1.0);\n"
+		"}\n";
+	const char *head =
+		"precision mediump float;\n"
+		"#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+		"#define HP highp\n"
+		"#else\n"
+		"#define HP mediump\n"
+		"#endif\n"
+		"varying vec2 uv;\n"
+		"uniform vec3 tint;\n"
+		"uniform vec3 accent;\n"
+		"uniform HP float t;\n"
+		"uniform float aspect;\n";
+	const char *fsrc[2] = { head, fragment };
+	GLuint program = glCreateProgram();
+	for (int i = 0; i < 2; i++) {
+		GLuint shader = glCreateShader(i ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+		if (i) glShaderSource(shader, 2, fsrc, NULL);
+		else glShaderSource(shader, 1, &vertex, NULL);
+		glCompileShader(shader);
+		GLint ok = 0;
+		glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+		if (!ok) {
+			char log[512];
+			glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+			wlr_log(WLR_ERROR, "live wallpaper shader: %s", log);
+			glDeleteShader(shader);
+			glDeleteProgram(program);
+			return 0;
+		}
+		glAttachShader(program, shader);
+		glDeleteShader(shader);
+	}
+	glBindAttribLocation(program, 0, "pos");
+	glLinkProgram(program);
+	GLint ok = 0;
+	glGetProgramiv(program, GL_LINK_STATUS, &ok);
+	if (!ok) {
+		wlr_log(WLR_ERROR, "live wallpaper shader did not link");
+		glDeleteProgram(program);
+		return 0;
+	}
+	return program;
+}
+
+/* [0] the video's frames, limited range, BT.601 or BT.709; then live_shader_names[]:
+ * cheap ones, a few sines a pixel, as the GPU draws them every frame */
+static const char *const lw_sources[1 + LIVE_SHADERS] = {
+	"uniform sampler2D ty, tu, tv;\n"
+	"uniform float bt709;\n"
+	"void main() {\n"
+	"	float y = 1.1644 * (texture2D(ty, uv).r - 0.0627);\n"
+	"	float u = texture2D(tu, uv).r - 0.502, v = texture2D(tv, uv).r - 0.502;\n"
+	"	vec3 c601 = vec3(y + 1.596 * v, y - 0.392 * u - 0.813 * v, y + 2.017 * u);\n"
+	"	vec3 c709 = vec3(y + 1.793 * v, y - 0.213 * u - 0.533 * v, y + 2.112 * u);\n"
+	"	vec3 c = mix(c601, c709, bt709);\n"
+	"	gl_FragColor = vec4(clamp(c, 0.0, 1.0) * tint, 1.0);\n"
+	"}\n",
+	/* aurora: three soft curtains of light drifting across a night sky,
+	 * in the accent colour turning toward green */
+	"void main() {\n"
+	"	vec2 p = vec2(uv.x, uv.y * aspect);\n"
+	"	vec3 sky = mix(vec3(0.0, 0.01, 0.04), accent * 0.18, uv.y);\n"
+	"	vec3 c = sky;\n"
+	"	for (int i = 0; i < 3; i++) {\n"
+	"		float k = float(i);\n"
+	"		HP float ph = t * (0.21 + 0.07 * k) + k * 2.1;\n"
+	"		float y0 = aspect * (0.22 + 0.13 * k) + 0.08 * sin(p.x * 2.6 + ph) + 0.035 * sin(p.x * 6.3 - ph * 1.7);\n"
+	"		float d = (p.y - y0) * (6.0 + 2.0 * k);\n"
+	"		float band = exp(-d * d) * (0.55 + 0.45 * sin(p.x * 9.0 + ph * 2.3 + k));\n"
+	"		vec3 hue = mix(accent, vec3(0.25, 0.95, 0.65), 0.5 + 0.5 * sin(ph * 0.31 + k));\n"
+	"		c += band * hue * 0.55;\n"
+	"	}\n"
+	"	gl_FragColor = vec4(c * tint, 1.0);\n"
+	"}\n",
+	/* waves: slow interference of the accent colour with its shadow */
+	"void main() {\n"
+	"	vec2 p = vec2(uv.x, uv.y * aspect) * 3.0;\n"
+	"	HP float s = t * 0.35;\n"
+	"	float v = sin(p.x * 1.3 + s) + sin(p.y * 0.9 - s * 0.8) + sin((p.x + p.y) * 0.7 + s * 1.1)\n"
+	"		+ sin(length(p - vec2(1.5, 3.5 * aspect)) * 1.6 - s * 1.4);\n"
+	"	float l = 0.5 + 0.5 * sin(v * 1.1);\n"
+	"	vec3 c = mix(accent * 0.12, accent * 0.75 + vec3(0.06), l * l);\n"
+	"	c += vec3(0.03, 0.03, 0.06) * (1.0 - uv.y);\n"
+	"	gl_FragColor = vec4(c * tint, 1.0);\n"
+	"}\n",
+};
+
+static void lw_upload(GLuint tex, int x, int y, int w, int h, int tw, int th, bool alloc,
+		const unsigned char *pixels) {
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	if (alloc) {
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, tw, th, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, NULL);
+	}
+	glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_LUMINANCE, GL_UNSIGNED_BYTE, pixels);
+	frame_uploads++;
+	frame_upload_bytes += (double)w * h;
+}
+
+/* The next video frame into the textures, if one is due and has come. */
+static void lw_take_frame(struct zt_server *server) {
+	if (!server->lw_due || server->lw_pid <= 0 || server->lw_got < server->lw_len || !server->lw_len) {
+		return;
+	}
+	int w = server->lw_w, h = server->lw_h;
+	/* padded to 64 pixels, as the shell's other textures (zt_buffer_create);
+	 * the chroma planes to half of that, so one uv serves all three */
+	int tw = (w + 63) / 64 * 64, th = (h + 63) / 64 * 64;
+	bool alloc = !server->lw_tex[0] || tw != server->lw_tw || th != server->lw_th;
+	if (!server->lw_tex[0]) {
+		glGenTextures(3, server->lw_tex);
+	}
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+#ifdef GL_UNPACK_ROW_LENGTH_EXT
+	glPixelStorei(GL_UNPACK_ROW_LENGTH_EXT, 0);
+#endif
+	const unsigned char *y = server->lw_buf, *u = y + (size_t)w * h, *v = u + (size_t)(w / 2) * (h / 2);
+	lw_upload(server->lw_tex[0], 0, 0, w, h, tw, th, alloc, y);
+	lw_upload(server->lw_tex[1], 0, 0, w / 2, h / 2, tw / 2, th / 2, alloc, u);
+	lw_upload(server->lw_tex[2], 0, 0, w / 2, h / 2, tw / 2, th / 2, alloc, v);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+	server->lw_tw = tw;
+	server->lw_th = th;
+	server->lw_have = true;
+	server->lw_due = false;
+	server->lw_got = 0;
+	if (server->lw_source) {
+		wl_event_source_fd_update(server->lw_source, WL_EVENT_READABLE);	/* the next one */
+	}
+}
+
+/* Under the lock layer at `y` (it slides up to unlock): the shader or the
+ * video's last frame, or black until the video's first frame has come. */
+static void lw_draw(struct zt_server *server, float y) {
+	if (!lw_active(server)) {
+		return;
+	}
+	lw_sync(server);
+	int which = server->lw_mode == LIVE_SHADER ? 1 + server->lw_shader : 0;
+	if (!server->lw_prog[which]) {
+		server->lw_prog[which] = lw_compile(lw_sources[which]);
+	}
+	float m[16], mvp[16];
+	mat_identity(m);
+	mat_translate(m, 0, y);
+	mat_scale(m, server->width, server->height);
+	if (which == 0) {
+		lw_take_frame(server);
+	}
+	GLuint program = server->lw_prog[which];
+	if (!program || (which == 0 && !server->lw_have)) {
+		quad(server, GL_TEXTURE_2D, server->black_tex, m, 1.0f, false, true, 1, 1);
+		return;
+	}
+	mat_mul(mvp, server->projection, m);
+	glUseProgram(program);
+	glUniformMatrix4fv(glGetUniformLocation(program, "mvp"), 1, GL_FALSE, mvp);
+	if (which == 0) {
+		/* cover the screen: the middle of the frame, cut to the screen's shape */
+		float su = (float)server->lw_w / server->lw_tw, sv = (float)server->lw_h / server->lw_th;
+		float frame = (float)server->lw_w / server->lw_h, screen = (float)server->width / server->height;
+		float ku = frame > screen ? screen / frame : 1.0f, kv = frame > screen ? 1.0f : frame / screen;
+		glUniform2f(glGetUniformLocation(program, "uv_scale"), su * ku, sv * kv);
+		glUniform2f(glGetUniformLocation(program, "uv_off"), su * (1.0f - ku) / 2, sv * (1.0f - kv) / 2);
+		glUniform1f(glGetUniformLocation(program, "bt709"), server->lw_matrix == 709 ? 1.0f : 0.0f);
+		static const char *const names[3] = { "ty", "tu", "tv" };
+		for (int i = 0; i < 3; i++) {
+			glActiveTexture(GL_TEXTURE0 + i);
+			glBindTexture(GL_TEXTURE_2D, server->lw_tex[i]);
+			glUniform1i(glGetUniformLocation(program, names[i]), i);
+		}
+	} else {
+		glUniform2f(glGetUniformLocation(program, "uv_scale"), 1.0f, 1.0f);
+		glUniform2f(glGetUniformLocation(program, "uv_off"), 0.0f, 0.0f);
+	}
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	/* seconds, kept small for the GPU's floats: a jump once in 20 minutes */
+	float t = (float)fmod((double)ts.tv_sec + ts.tv_nsec / 1e9, 1200.0);
+	glUniform1f(glGetUniformLocation(program, "t"), t);
+	glUniform1f(glGetUniformLocation(program, "aspect"), (float)server->height / server->width);
+	glUniform3f(glGetUniformLocation(program, "tint"), server->tint[0], server->tint[1], server->tint[2]);
+	glUniform3f(glGetUniformLocation(program, "accent"), ((server->accent >> 16) & 0xff) / 255.0f,
+		((server->accent >> 8) & 0xff) / 255.0f, (server->accent & 0xff) / 255.0f);
+	static const GLfloat corners[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, corners);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glDisableVertexAttribArray(0);
+	for (int i = 2; i >= 0; i--) {
+		glActiveTexture(GL_TEXTURE0 + i);
+		glBindTexture(GL_TEXTURE_2D, 0);
+	}
+	frame_quads++;
+	frame_px += (double)server->width * server->height * server->scale * server->scale;
+}
+
 static void draw_lock(struct zt_server *server) {
 	cairo_t *cr;
 	struct zt_buffer *buffer = zt_buffer_create(server, server->width, server->height, &cr);
@@ -6374,20 +6901,26 @@ static void draw_lock(struct zt_server *server) {
 	}
 	double r = ((server->accent >> 16) & 0xff) / 255.0, g = ((server->accent >> 8) & 0xff) / 255.0,
 		b = (server->accent & 0xff) / 255.0;
-	cairo_pattern_t *fade = cairo_pattern_create_linear(0, 0, 0, server->height);
-	cairo_pattern_add_color_stop_rgb(fade, 0.0, 0, 0, 0);
-	cairo_pattern_add_color_stop_rgb(fade, 0.25, 0, 0, 0);
-	cairo_pattern_add_color_stop_rgb(fade, 1.0, r * 0.5, g * 0.5, b * 0.5);
-	cairo_set_source(cr, fade);
-	cairo_paint(cr);
-	cairo_pattern_destroy(fade);
-	if (server->lock_wall) {
-		/* the photo, and a shade rising from the bottom for the clock */
-		cairo_save(cr);
-		cairo_scale(cr, 1.0 / server->scale, 1.0 / server->scale);
-		cairo_set_source_surface(cr, server->lock_wall, 0, 0);
+	/* a live wallpaper is drawn under this layer (lw_draw): only the shade */
+	bool live = lw_active(server);
+	if (!live) {
+		cairo_pattern_t *fade = cairo_pattern_create_linear(0, 0, 0, server->height);
+		cairo_pattern_add_color_stop_rgb(fade, 0.0, 0, 0, 0);
+		cairo_pattern_add_color_stop_rgb(fade, 0.25, 0, 0, 0);
+		cairo_pattern_add_color_stop_rgb(fade, 1.0, r * 0.5, g * 0.5, b * 0.5);
+		cairo_set_source(cr, fade);
 		cairo_paint(cr);
-		cairo_restore(cr);
+		cairo_pattern_destroy(fade);
+	}
+	if (live || server->lock_wall) {
+		/* the photo, and a shade rising from the bottom for the clock */
+		if (!live) {
+			cairo_save(cr);
+			cairo_scale(cr, 1.0 / server->scale, 1.0 / server->scale);
+			cairo_set_source_surface(cr, server->lock_wall, 0, 0);
+			cairo_paint(cr);
+			cairo_restore(cr);
+		}
 		cairo_pattern_t *shade = cairo_pattern_create_linear(0, 0, 0, server->height);
 		cairo_pattern_add_color_stop_rgba(shade, 0.0, 0, 0, 0, 0.25);
 		cairo_pattern_add_color_stop_rgba(shade, 0.15, 0, 0, 0, 0.0);
@@ -14825,6 +15358,7 @@ static void render_frame(struct zt_server *server, bool show) {
 	if (server->lock_layer.tex && (server->locked || server->lock_y > 1.0f - server->height) && !retro_on(server)) {
 		/* (held power: the lock screen comes down, see power_render) */
 		float ly = server->lock_y + (server->power_lock ? server->power_y : 0.0f);
+		lw_draw(server, ly);	/* a live wallpaper, under it */
 		layer_draw(server, &server->lock_layer, 0, ly, 1.0f);
 		/* the clock block rises by LOCK_LIFT as the notification row comes in */
 		float lift = server->lock_lift < 0.0f ? 0.0f : server->lock_lift > 1.0f ? 1.0f : server->lock_lift;
@@ -15314,7 +15848,12 @@ static int reload(int signal_number, void *data) {
 	int android_icons = server->android_icons;
 	int strength = server->haptic_strength;
 	int ring_before = server->ring_volume;
+	int lw_mode = server->lw_mode, lw_shader = server->lw_shader, lw_fps = server->lw_fps;
+	bool lw_loop = server->lw_loop;
+	char lw_video[sizeof(server->lw_video)];
+	snprintf(lw_video, sizeof(lw_video), "%s", server->lw_video);
 	load_config(server);
+	lw_reconfigure(server, lw_mode, lw_shader, lw_video, lw_fps, lw_loop);
 	if (server->style_config != server->style) {
 		/* the settings app chose the other style: the session starts again */
 		style_switch(server, server->style_config);
@@ -15738,6 +16277,7 @@ int main(int argc, char *argv[]) {
 	server.power_idle_timer = wl_event_loop_add_timer(server.loop, power_idle, &server);
 	server.power_off_timer = wl_event_loop_add_timer(server.loop, power_off_step, &server);
 	server.live_fd = -1;
+	server.lw_fd = -1;
 	live_watch_start(&server);
 	server.net_timer = wl_event_loop_add_timer(server.loop, net_tick, &server);
 	wl_event_source_timer_update(server.net_timer, 3000);
@@ -15835,6 +16375,7 @@ int main(int argc, char *argv[]) {
 		perf_tell("screen on\n");
 	}
 	server.clock_timer = wl_event_loop_add_timer(server.loop, clock_tick, &server);
+	server.lw_timer = wl_event_loop_add_timer(server.loop, lw_tick, &server);
 	clock_tick(&server);
 
 	{

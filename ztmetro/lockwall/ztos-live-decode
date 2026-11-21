@@ -1,0 +1,62 @@
+#!/bin/sh
+# ztos-live-decode FPS FILE [once|loop]
+#
+# The lock screen's live wallpaper (ztmetro, config lock_live = video): FILE
+# as raw yuv420p frames at FPS frames a second of the video's time, on
+# standard output, after a header of 64 bytes, "ZTLW1 <width> <height>
+# <601|709>" and spaces to its newline: the frames' size and colour matrix.
+# The frames keep the video's own size (even, and at most 1080 wide: bigger
+# ones are scaled down); ztmetro crops and scales them on the GPU. Played
+# once and ended ("once", the default: ztmetro keeps its last frame), or
+# looped for ever ("loop"). ztmetro reads a frame only when one is due, so
+# this runs at its pace, blocked on the full pipe in between, and is killed
+# when it is no longer wanted; with ztmetro gone, it ends on the broken pipe.
+#
+# The Exynos MFC decodes H.264, HEVC, VP8/9 and MPEG-4 (ffmpeg's v4l2m2m
+# decoders, as mpv's hwdec=v4l2m2m-copy); the rest, or LIVE_HWDEC=no, on the
+# CPU. Measured on the M20, a 720x1280 frame: ~9 ms of CPU passed through,
+# ~68 ms when swscale scales it out of the MFC's uncached buffers, so only
+# videos too big to pass are scaled. The MFC decoder does not survive
+# ffmpeg's -stream_loop (it ends at the first loop), so the loop is here. One
+# thread each: waking a pool of filter threads for every frame cost twice the
+# CPU of the work itself.
+[ $# -ge 2 ] || { echo "usage: $0 FPS FILE [once|loop]" >&2; exit 2; }
+fps=$1 file=$2 mode=${3:-once}
+[ -r "$file" ] || { echo "$0: cannot read $file" >&2; exit 1; }
+info=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height,color_space:stream_side_data=rotation \
+	-of default=noprint_wrappers=1 "$file" 2>/dev/null)
+val() { printf '%s\n' "$info" | sed -n "s/^$1=//p" | head -1; }
+codec=$(val codec_name) w=$(val width) h=$(val height) rot=$(val rotation) space=$(val color_space)
+[ -n "$w" ] && [ -n "$h" ] || { echo "$0: no video in $file" >&2; exit 1; }
+case $rot in 90|-90|270|-270) t=$w; w=$h; h=$t ;; esac	# ffmpeg turns it upright
+scale=
+if [ "$w" -gt 1080 ]; then
+	h=$((h * 1080 / w)); w=1080
+	scale="scale=$w:$((h / 2 * 2)):flags=fast_bilinear,"
+fi
+w=$((w / 2 * 2)) h=$((h / 2 * 2))
+matrix=601
+case $space in bt709) matrix=709 ;; unknown|"") [ "$h" -ge 720 ] && [ "$w" -ge 720 ] && matrix=709 ;; esac
+hw=
+if [ "${LIVE_HWDEC:-yes}" != no ]; then
+	case $codec in
+	h264|hevc|vp8|vp9|mpeg4) hw="-c:v ${codec}_v4l2m2m" ;;
+	esac
+fi
+vf="fps=$fps,${scale}crop=$w:$h:0:0"
+printf '%-63s\n' "ZTLW1 $w $h $matrix"
+while :; do
+	ffmpeg -nostdin -hide_banner -loglevel error -threads 1 -filter_threads 1 $hw -i "$file" \
+		-an -sn -dn -vf "$vf" -f rawvideo -pix_fmt yuv420p pipe:1
+	rc=$?
+	# the reader gone (SIGPIPE, or killed): stop
+	[ $rc -ge 128 ] && exit $rc
+	if [ $rc -ne 0 ]; then
+		[ -n "$hw" ] || exit $rc		# it will not play
+		echo "$0: the hardware decoder failed ($rc); on the CPU from now" >&2
+		hw=
+		sleep 1
+		continue
+	fi
+	[ "$mode" = loop ] || exit 0
+done
