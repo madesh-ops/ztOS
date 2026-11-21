@@ -122,17 +122,17 @@ static struct wakeup_source *stream_ws;
 
 #define BUS_ID0	40	/* i2c-gpio adapters 40..42 */
 
-static struct gpiod_lookup_table bus_gpios[3] = {
-	{ .dev_id = "i2c-gpio.40", .table = {
-		GPIO_LOOKUP_IDX("gpc2", 0, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
-		GPIO_LOOKUP_IDX("gpc2", 1, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN), { } } },
-	{ .dev_id = "i2c-gpio.41", .table = {
-		GPIO_LOOKUP_IDX("gpc1", 2, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
-		GPIO_LOOKUP_IDX("gpc1", 3, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN), { } } },
-	{ .dev_id = "i2c-gpio.42", .table = {
-		GPIO_LOOKUP_IDX("gpc1", 6, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
-		GPIO_LOOKUP_IDX("gpc1", 7, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN), { } } },
-};
+/* (each table ends in a flexible array: three objects, not an array of them) */
+static struct gpiod_lookup_table bus_gpios0 = { .dev_id = "i2c-gpio.40", .table = {
+	GPIO_LOOKUP_IDX("gpc2", 0, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+	GPIO_LOOKUP_IDX("gpc2", 1, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN), { } } };
+static struct gpiod_lookup_table bus_gpios1 = { .dev_id = "i2c-gpio.41", .table = {
+	GPIO_LOOKUP_IDX("gpc1", 2, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+	GPIO_LOOKUP_IDX("gpc1", 3, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN), { } } };
+static struct gpiod_lookup_table bus_gpios2 = { .dev_id = "i2c-gpio.42", .table = {
+	GPIO_LOOKUP_IDX("gpc1", 6, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+	GPIO_LOOKUP_IDX("gpc1", 7, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN), { } } };
+static struct gpiod_lookup_table *bus_gpios[3] = { &bus_gpios0, &bus_gpios1, &bus_gpios2 };
 static struct gpiod_lookup_table ctl_gpios = {
 	.dev_id = "zrn-m20cam", .table = {
 		GPIO_LOOKUP("gpg3", 4, "reset", GPIO_ACTIVE_HIGH),
@@ -704,7 +704,7 @@ static void buses_down(void)
 			platform_device_unregister(bus_pdev[i]);
 			bus_pdev[i] = NULL;
 		}
-		gpiod_remove_lookup_table(&bus_gpios[i]);
+		gpiod_remove_lookup_table(bus_gpios[i]);
 	}
 }
 
@@ -749,7 +749,7 @@ static int __init m20cam_init(void)
 	}
 	request_module("i2c-gpio");
 	for (i = 0; i < 3; i++) {
-		gpiod_add_lookup_table(&bus_gpios[i]);
+		gpiod_add_lookup_table(bus_gpios[i]);
 		bus_pdev[i] = platform_device_register_data(NULL, "i2c-gpio", BUS_ID0 + i,
 							    &bus_pdata, sizeof(bus_pdata));
 		if (IS_ERR(bus_pdev[i])) {
