@@ -154,7 +154,7 @@ try:
     say("F: sensor stream on, then 1 s of counters")
     wr(csis, 0x14, 0xffffffff)                       # clear latched sources
     wr(csis, 0x1c, 0xffffffff)
-    sensor("3l6-on-bars.txt" if BARS else "3l6-on.txt")
+    sensor("3l6-on-bars.txt" if BARS else ("3l6-on.txt" if sys.argv[2] == "scene" else "3l6-on-%s.txt" % sys.argv[2]))
     for i in range(4):
         time.sleep(0.25)
         say("   t=%.2f FRM_CNT0 %d SRC0 %#010x SRC1 %#010x DMA_SRC %#010x DMA_ERR %#x ACT_CTRL %#x" % (

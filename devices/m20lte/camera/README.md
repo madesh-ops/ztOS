@@ -76,8 +76,12 @@ from user space (GPIO character device, `/dev/mem`); nothing in the kernel yet.
     bits each, 10 bits low, padded to 2112), black 64, white 1023, Bayer **GRBG**.
   - The camera SysMMU (0x14540000) is secure: one read of it was an SError and a
     reboot. Its DMA is not translated (the frame lands at the physical address).
-  - A scene with the default 120 fps exposure: all at black (64-65); exposure
-    and gain are next.
+  - A scene with the default 120 fps exposure: all at black (64-65).
+- 2026-11-21: **first photo** (`first-photo-window.png`): `csis-capture.py 26 exp
+  7885` with `3l6-on-exp.txt` (coarse integration 0x0202 = 800 of 816 lines,
+  analog gain 0x0204 = 0x80, 4x): median 120, highlights at 1023. Developed at half
+  size (black 64, GRBG, grey-world gains R 1.34 B 1.25, gamma 2.2). Soft: the
+  DW9808 focus actuator (0x18 on i2c ch 3) is not driven yet.
 
 ## Next
 
