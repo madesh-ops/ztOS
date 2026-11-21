@@ -12,8 +12,13 @@
  *	mmap			frames of 16-bit Bayer (10 bits low), info.area bytes apart
  *	ioctl ZRN_CAM_DMABUF	the same memory as a DMA-BUF, for the GPU
  *
- * "front", "frontfull" and the aperture commands answer -ENODEV: the front camera
- * (S5K4HA) and the wide one (S5K5E9) are not done yet.
+ *	write "front"		the front camera (S5K4HA), 1632x1224 at 30 fps
+ *	write "frontfull"	the same at 3264x2448, 30 fps
+ *
+ * The aperture commands answer -ENODEV (the M20 has none); the wide camera
+ * (S5K5E9) is not done yet. The front camera: sensor 0x2d on gpc1-0/1, reset
+ * gpg3-5, AVDD LDO5, DVDD LDO1 1.2 V, MCLK1 on gpc0-1, receiver CSIS0
+ * (0x14400000) with PHY m0s4B (PMU 0x67c, SYSREG_CAM 0x840 bit 16), "DMA0 only".
  *
  * Every step was first done from user space: devices/m20lte/camera/ (README.md).
  * Power: the S2MPB03 camera PMIC (0x56) on gpc2-0/1, the sensor (0x2d) on
@@ -60,13 +65,9 @@ struct zrn_cam_frame {
 };
 enum { LS_RUNNING, LS_ASKED, LS_IDLE, LS_TIME, LS_HOT, LS_ERRORS, LS_FAILED };
 
-#define PV_W		1052
-#define PV_H		780
-#define PV_FLL		3264		/* frame length lines: 816 is 120 fps, this is 30 */
-#define FULL_W		4128
+#define FULL_W		4128		/* the largest frame: the rear's full size */
 #define FULL_H		3096
-#define FULL_FLL	0x0cc1
-#define STRIDE(w)	ALIGN((w) * 2, 64)	/* observed: 1052 pixels -> 2112 bytes */
+#define STRIDE(w)	ALIGN((w) * 2, 64)	/* observed: 1052 -> 2112 bytes, 1632 -> 3264 */
 #define LIVE_BUFS	4
 #define LIVE_FULL_BUFS	2
 #define LIVE_FULL_AREA	((size_t)STRIDE(FULL_W) * FULL_H)
@@ -77,21 +78,50 @@ enum { LS_RUNNING, LS_ASKED, LS_IDLE, LS_TIME, LS_HOT, LS_ERRORS, LS_FAILED };
 #define LIVE_ERR_MAX	30
 #define LIVE_ERR_WINDOW_S 5
 #define LIVE_ERR_LOGS	8
-#define SETTLE		26		/* Samsung's for 1196 Mbps; 18-44 all clean here */
 #define RAW10		0x2b
+
+/* one camera: its sensor, power, clock, receiver and modes */
+struct cam {
+	const char *name;
+	u32 csis_pa, iso, rst;		/* receiver; PHY isolation (PMU) and reset bit (SYSREG_CAM 0x840) */
+	int bus, mclk_ch;		/* sensor I2C adapter (index), MCLK channel */
+	u16 id;				/* model ID at 0x0000 */
+	bool stream8;			/* 0x0100 written as 8 bits */
+	u32 settle, arb, split;		/* PHY settle; CSIS-DMA common arbitration and SRAM split */
+	const struct cis_reg *global, *pv, *full;
+	size_t n_global, n_pv, n_full;
+	u32 pv_w, pv_h, pv_fll, full_w, full_h, full_fll;
+};
+static const struct cam cam_rear = {
+	"rear", 0x14410000, 0x680, 8, 1, 2, 0x30c6, false,
+	26, 2, (320 << 16) | 4,		/* Samsung's settle for 1196 Mbps; "DMA1 only" */
+	tb_3l6_global, tb_3l6_1052x780, tb_3l6_4128x3096,
+	ARRAY_SIZE(tb_3l6_global), ARRAY_SIZE(tb_3l6_1052x780), ARRAY_SIZE(tb_3l6_4128x3096),
+	1052, 780, 3264,		/* 816 lines is 120 fps, 3264 is 30 */
+	4128, 3096, 0x0cc1,
+};
+static const struct cam cam_front = {
+	"front", 0x14400000, 0x67c, 16, 3, 1, 0x48ab, true,
+	14, 1, (320 << 16) | 640,	/* fimc-is-device-module-4ha.c; "DMA0 only" */
+	tb_4ha_global, tb_4ha_1632x1224, tb_4ha_3264x2448,
+	ARRAY_SIZE(tb_4ha_global), ARRAY_SIZE(tb_4ha_1632x1224), ARRAY_SIZE(tb_4ha_3264x2448),
+	1632, 1224, 2538,
+	3264, 2448, 2538,
+};
+static const struct cam *cur = &cam_rear;
 
 static bool live_tp;
 module_param(live_tp, bool, 0644);	/* the sensor's colour bars instead of the room */
 
 /* --- the hardware --- */
-static void __iomem *top, *pmu, *sysreg, *csis, *dmac, *pin;
+static void __iomem *top, *pmu, *sysreg, *csis_rear, *csis_front, *dmac, *pin;
+static void __iomem *csis;		/* the streaming camera's receiver */
 #define TOP_CAM_GATE	0x200c
-#define TOP_CIS2_MUX	0x1010
-#define TOP_CIS2_DIV	0x1818
-#define TOP_CIS2_GATE	0x2018
+#define TOP_CIS_MUX(n)	(0x1008 + 4 * (n))
+#define TOP_CIS_DIV(n)	(0x1810 + 4 * (n))
+#define TOP_CIS_GATE(n)	(0x2010 + 4 * (n))
 #define PIN_GPC0_CON	0x1c0
 #define PIN_GPC0_PUD	0x1c8
-#define PMU_PHY_ISO	0x680
 #define SYSREG_PHY	0x840
 #define CSIS_VERSION	0x000
 #define CSIS_CMN	0x004
@@ -113,14 +143,15 @@ static void __iomem *top, *pmu, *sysreg, *csis, *dmac, *pin;
 #define DMAC_SPLIT	0xc
 #define DMAC_MATRIX	0x10
 
-static struct platform_device *ctl_pdev, *bus_pdev[3];
+#define NBUS	4
+static struct platform_device *ctl_pdev, *bus_pdev[NBUS];
 static struct device *ctl_dev;
-static struct i2c_adapter *bus[3];		/* 0 PMIC, 1 sensor, 2 focus */
-static struct gpio_desc *reset_gpio, *afen_gpio;
+static struct i2c_adapter *bus[NBUS];	/* 0 PMIC, 1 rear sensor, 2 focus, 3 front sensor */
+static struct gpio_desc *reset_gpio, *afen_gpio, *freset_gpio;
 static DEFINE_MUTEX(lock);
 static struct wakeup_source *stream_ws;
 
-#define BUS_ID0	40	/* i2c-gpio adapters 40..42 */
+#define BUS_ID0	40	/* i2c-gpio adapters 40..43 */
 
 /* (each table ends in a flexible array: three objects, not an array of them) */
 static struct gpiod_lookup_table bus_gpios0 = { .dev_id = "i2c-gpio.40", .table = {
@@ -132,11 +163,15 @@ static struct gpiod_lookup_table bus_gpios1 = { .dev_id = "i2c-gpio.41", .table 
 static struct gpiod_lookup_table bus_gpios2 = { .dev_id = "i2c-gpio.42", .table = {
 	GPIO_LOOKUP_IDX("gpc1", 6, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
 	GPIO_LOOKUP_IDX("gpc1", 7, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN), { } } };
-static struct gpiod_lookup_table *bus_gpios[3] = { &bus_gpios0, &bus_gpios1, &bus_gpios2 };
+static struct gpiod_lookup_table bus_gpios3 = { .dev_id = "i2c-gpio.43", .table = {
+	GPIO_LOOKUP_IDX("gpc1", 0, NULL, 0, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN),
+	GPIO_LOOKUP_IDX("gpc1", 1, NULL, 1, GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN), { } } };
+static struct gpiod_lookup_table *bus_gpios[NBUS] = { &bus_gpios0, &bus_gpios1, &bus_gpios2, &bus_gpios3 };
 static struct gpiod_lookup_table ctl_gpios = {
 	.dev_id = "zrn-m20cam", .table = {
 		GPIO_LOOKUP("gpg3", 4, "reset", GPIO_ACTIVE_HIGH),
-		GPIO_LOOKUP("gpg1", 5, "afen", GPIO_ACTIVE_HIGH), { } },
+		GPIO_LOOKUP("gpg1", 5, "afen", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpg3", 5, "freset", GPIO_ACTIVE_HIGH), { } },
 };
 static const struct i2c_gpio_platform_data bus_pdata = { .udelay = 2, .timeout = HZ / 10 };
 
@@ -154,7 +189,7 @@ static int cis_write(u16 reg, u16 val, int size)
 	u8 b[4] = { reg >> 8, reg & 0xff, size == 2 ? val >> 8 : val, val & 0xff };
 	struct i2c_msg m = { .addr = 0x2d, .len = 2 + size, .buf = b };
 
-	return i2c_transfer(bus[1], &m, 1) == 1 ? 0 : -EIO;
+	return i2c_transfer(bus[cur->bus], &m, 1) == 1 ? 0 : -EIO;
 }
 #define cis_write16(r, v)	cis_write(r, v, 2)
 #define cis_write8(r, v)	cis_write(r, v, 1)
@@ -165,7 +200,7 @@ static int cis_read(u16 reg, u8 *val, int n)
 	struct i2c_msg m[2] = { { .addr = 0x2d, .len = 2, .buf = a },
 				{ .addr = 0x2d, .flags = I2C_M_RD, .len = n, .buf = val } };
 
-	return i2c_transfer(bus[1], m, 2) == 2 ? 0 : -EIO;
+	return i2c_transfer(bus[cur->bus], m, 2) == 2 ? 0 : -EIO;
 }
 
 static int cis_table(const struct cis_reg *t, size_t n)
@@ -196,32 +231,61 @@ static void rmw(void __iomem *r, u32 clear, u32 set)
 	writel((readl(r) & ~clear) | set, r);
 }
 
-static void mclk(bool on)
+/* MCLK n: CMU_TOP CIS_CLKn from OSCCLK, undivided, on pin gpc0-n */
+static void mclk(int n, bool on)
 {
 	if (on) {
-		rmw(top + TOP_CIS2_MUX, 1, 0);		/* OSCCLK 26 MHz */
-		rmw(top + TOP_CIS2_DIV, 0x1f, 0);	/* /1 */
-		writel(0x300000, top + TOP_CIS2_GATE);	/* MANUAL | CG_VAL */
-		rmw(pin + PIN_GPC0_PUD, 0xf << 8, 0);
-		rmw(pin + PIN_GPC0_CON, 0xf << 8, 2 << 8);	/* gpc0-2: MCLK */
+		rmw(top + TOP_CIS_MUX(n), 1, 0);	/* OSCCLK 26 MHz */
+		rmw(top + TOP_CIS_DIV(n), 0x1f, 0);	/* /1 */
+		writel(0x300000, top + TOP_CIS_GATE(n));	/* MANUAL | CG_VAL */
+		rmw(pin + PIN_GPC0_PUD, 0xf << (4 * n), 0);
+		rmw(pin + PIN_GPC0_CON, 0xf << (4 * n), 2 << (4 * n));	/* MCLK function */
 	} else {
-		rmw(pin + PIN_GPC0_CON, 0xf << 8, 0);
-		rmw(pin + PIN_GPC0_PUD, 0xf << 8, 1 << 8);
-		writel(0x200000, top + TOP_CIS2_GATE);
+		rmw(pin + PIN_GPC0_CON, 0xf << (4 * n), 0);
+		rmw(pin + PIN_GPC0_PUD, 0xf << (4 * n), 1 << (4 * n));
+		writel(0x200000, top + TOP_CIS_GATE(n));
 	}
 }
 
 static void power_off(void)
 {
-	if (reset_gpio)
-		gpiod_set_value_cansleep(reset_gpio, 0);
+	if (cur == &cam_front) {
+		gpiod_set_value_cansleep(freset_gpio, 0);
+		usleep_range(2000, 2500);
+		mclk(1, false);
+		pmic_write(0x05, 0x2c);			/* LDO3 VDDIO off */
+		pmic_write(0x03, 0x1c);			/* LDO1 DVDD off */
+		pmic_write(0x07, 0x0e);			/* LDO5 AVDD off */
+		return;
+	}
+	gpiod_set_value_cansleep(reset_gpio, 0);
 	usleep_range(5000, 6000);
-	mclk(false);
-	if (afen_gpio)
-		gpiod_set_value_cansleep(afen_gpio, 0);
+	mclk(2, false);
+	gpiod_set_value_cansleep(afen_gpio, 0);
 	pmic_write(0x05, 0x2c);				/* LDO3 VDDIO off */
 	pmic_write(0x04, 0x1c);				/* LDO2 DVDD off */
 	pmic_write(0x08, 0x28);				/* LDO6 AVDD off */
+}
+
+/* fimc-is-device-module-4ha.c's order */
+static int power_on_front(void)
+{
+	int ret;
+
+	gpiod_set_value_cansleep(freset_gpio, 0);
+	ret = pmic_write(0x07, 0xa8);			/* LDO5 AVDD 2.8 V */
+	if (!ret)
+		ret = pmic_write(0x03, 0xa8);		/* LDO1 DVDD 1.2 V */
+	if (!ret)
+		ret = pmic_write(0x05, 0xac);		/* LDO3 VDDIO 1.8 V */
+	usleep_range(2000, 2500);
+	if (ret)
+		return ret;
+	mclk(1, true);
+	usleep_range(1000, 1500);
+	gpiod_set_value_cansleep(freset_gpio, 1);
+	usleep_range(3000, 3500);
+	return 0;
 }
 
 /* fimc-is-device-module-3l6.c's order */
@@ -229,6 +293,8 @@ static int power_on(void)
 {
 	int ret;
 
+	if (cur == &cam_front)
+		return power_on_front();
 	gpiod_set_value_cansleep(reset_gpio, 0);
 	ret = pmic_write(0x08, 0xa8);			/* LDO6 AVDD 2.8 V */
 	usleep_range(1000, 1100);
@@ -242,7 +308,7 @@ static int power_on(void)
 		return ret;
 	gpiod_set_value_cansleep(afen_gpio, 1);
 	usleep_range(12000, 13000);
-	mclk(true);
+	mclk(2, true);
 	usleep_range(10000, 11000);
 	gpiod_set_value_cansleep(reset_gpio, 1);
 	usleep_range(5000, 6000);
@@ -254,21 +320,21 @@ static void csis_on(u32 w, u32 h, dma_addr_t first)
 	int i;
 
 	writel(0x300000, top + TOP_CAM_GATE);		/* CAM bus clock held */
-	rmw(pmu + PMU_PHY_ISO, 0, 1);			/* PHY isolation bypass */
-	rmw(sysreg + SYSREG_PHY, BIT(8), 0);		/* PHY reset, released */
-	rmw(sysreg + SYSREG_PHY, 0, BIT(8));
+	rmw(pmu + cur->iso, 0, 1);			/* PHY isolation bypass */
+	rmw(sysreg + SYSREG_PHY, BIT(cur->rst), 0);	/* PHY reset, released */
+	rmw(sysreg + SYSREG_PHY, 0, BIT(cur->rst));
 	rmw(csis + CSIS_CMN, 0, BIT(1));		/* software reset */
 	for (i = 0; i < 100 && (readl(csis + CSIS_CMN) & BIT(1)); i++)
 		udelay(10);
 	/* settle, S_CLKSETTLECTL 1, S_BYTE_CLK_ENABLE (always on the 7885), 4 data lanes */
-	rmw(csis + CSIS_PHY_CMN, 0xffff009f, (SETTLE << 24) | (1 << 16) | BIT(7) | (0xf << 1));
+	rmw(csis + CSIS_PHY_CMN, 0xffff009f, (cur->settle << 24) | (1 << 16) | BIT(7) | (0xf << 1));
 	rmw(csis + CSIS_CMN, (3 << 8) | (3 << 10) | BIT(12), 3 << 8);	/* 4 lanes, ch0 only */
 	rmw(csis + CSIS_CFG0, 0x3fff, (RAW10 << 2) | BIT(12));
 	writel((h << 16) | w, csis + CSIS_RES0);
-	/* CSIS-DMA common, "DMA1 only" (csi_hw_s_dma_common_dynamic) */
-	rmw(dmac + DMAC_ARB, 3, 2);
+	/* CSIS-DMA common for this receiver alone (csi_hw_s_dma_common_dynamic) */
+	rmw(dmac + DMAC_ARB, 3, cur->arb);
 	rmw(dmac + DMAC_CTRL, 0, BIT(1));
-	writel((320 << 16) | 4, dmac + DMAC_SPLIT);
+	writel(cur->split, dmac + DMAC_SPLIT);
 	writel(0, dmac + DMAC_MATRIX);
 	writel(0, csis + DMA0_FMT);			/* 2D, unpacked, legacy, RAW10 */
 	writel(w, csis + DMA0_RESOL);
@@ -291,8 +357,8 @@ static void csis_off(void)
 	rmw(csis + CSIS_PHY_CMN, 0x1f, 0);
 	rmw(csis + CSIS_CMN, 1, 0);
 	rmw(dmac + DMAC_CTRL, BIT(1), 0);
-	rmw(sysreg + SYSREG_PHY, BIT(8), 0);
-	rmw(pmu + PMU_PHY_ISO, 1, 0);
+	rmw(sysreg + SYSREG_PHY, BIT(cur->rst), 0);
+	rmw(pmu + cur->iso, 1, 0);
 	writel(0x200000, top + TOP_CAM_GATE);
 }
 
@@ -385,7 +451,7 @@ static int cpu_mc(void)
 static int live_thread(void *d)
 {
 	unsigned long start = jiffies, last_temp = jiffies, err_from = jiffies;
-	unsigned int cur = 0, why = LS_RUNNING, errs = 0, recent = 0, logged = 0;
+	unsigned int buf = 0, why = LS_RUNNING, errs = 0, recent = 0, logged = 0;
 
 	while (why == LS_RUNNING) {
 		u32 s0 = readl(csis + CSIS_SRC0), s1 = readl(csis + CSIS_SRC1);
@@ -413,11 +479,11 @@ static int live_thread(void *d)
 		if (dm & BIT(8)) {	/* a frame finished: publish it, the next goes elsewhere */
 			spin_lock(&live_slock);
 			live_info.seq++;
-			live_info.index = cur;
+			live_info.index = buf;
 			live_info.errors = errs;
 			spin_unlock(&live_slock);
-			cur = (cur + 1) % live_bufs;
-			live_addr(cur);
+			buf = (buf + 1) % live_bufs;
+			live_addr(buf);
 		}
 		if (READ_ONCE(live_stop_asked))
 			why = LS_ASKED;
@@ -436,7 +502,10 @@ static int live_thread(void *d)
 	}
 	mutex_lock(&lock);
 	writel(0, csis + DMA0_CTRL);
-	cis_write16(0x0100, 0x0000);
+	if (cur->stream8)
+		cis_write8(0x0100, 0x00);
+	else
+		cis_write16(0x0100, 0x0000);
 	msleep(50);
 	csis_off();
 	af_down();
@@ -452,9 +521,9 @@ static int live_thread(void *d)
 	return 0;
 }
 
-static int live_start(bool full)
+static int live_start(const struct cam *c, bool full)
 {
-	u32 w = full ? FULL_W : PV_W, h = full ? FULL_H : PV_H;
+	u32 w = full ? c->full_w : c->pv_w, h = full ? c->full_h : c->pv_h;
 	struct task_struct *t;
 	u8 id[2];
 	int ret;
@@ -464,28 +533,31 @@ static int live_start(bool full)
 		ret = -EBUSY;
 		goto out;
 	}
+	cur = c;
+	csis = c == &cam_front ? csis_front : csis_rear;
 	if (readl(csis + CSIS_VERSION) != 0x05010001) {
 		ret = -ENODEV;
 		goto out;
 	}
 	live_area = (size_t)STRIDE(w) * h;
 	live_bufs = full ? LIVE_FULL_BUFS : LIVE_BUFS;
-	live_fll = full ? FULL_FLL : PV_FLL;
+	live_fll = full ? c->full_fll : c->pv_fll;
 	ret = power_on();
 	if (ret)
 		goto off;
 	ret = cis_read(0x0000, id, 2);
-	if (!ret && (id[0] << 8 | id[1]) != 0x30c6)
+	if (!ret && (id[0] << 8 | id[1]) != c->id)
 		ret = -ENODEV;
 	if (!ret)
-		ret = cis_table(tb_3l6_global, ARRAY_SIZE(tb_3l6_global));
+		ret = cis_table(c->global, c->n_global);
+	if (!ret && c->stream8)
+		usleep_range(5000, 5500);		/* the 4HA's global ends in a 5 ms wait */
 	if (!ret)
-		ret = full ? cis_table(tb_3l6_4128x3096, ARRAY_SIZE(tb_3l6_4128x3096))
-			   : cis_table(tb_3l6_1052x780, ARRAY_SIZE(tb_3l6_1052x780));
+		ret = full ? cis_table(c->full, c->n_full) : cis_table(c->pv, c->n_pv);
 	if (!ret)
 		ret = cis_write16(0x0340, live_fll);
 	if (!ret)
-		ret = cis_write16(0x0202, 0x0320);		/* a start for AE: 800 lines */
+		ret = cis_write16(0x0202, c->stream8 ? 2000 : 800);	/* a start for AE */
 	if (!ret)
 		ret = cis_write16(0x0204, 0x0080);		/* 4x */
 	if (!ret && live_tp)
@@ -494,13 +566,17 @@ static int live_start(bool full)
 		goto off;
 	__pm_stay_awake(stream_ws);
 	csis_on(w, h, live_dma);
-	/* sensor_3l6_cis_stream_on */
-	cis_write16(0x3892, 0x3600);
-	cis_write16(0x3c1e, 0x0100);
-	usleep_range(3000, 3100);
-	ret = cis_write16(0x0100, 0x0100);
-	usleep_range(3000, 3100);
-	cis_write16(0x3c1e, 0x0000);
+	if (c->stream8) {
+		ret = cis_write8(0x0100, 0x01);		/* sensor_4ha_cis_stream_on */
+	} else {
+		/* sensor_3l6_cis_stream_on */
+		cis_write16(0x3892, 0x3600);
+		cis_write16(0x3c1e, 0x0100);
+		usleep_range(3000, 3100);
+		ret = cis_write16(0x0100, 0x0100);
+		usleep_range(3000, 3100);
+		cis_write16(0x3c1e, 0x0000);
+	}
 	if (ret) {
 		csis_off();
 		__pm_relax(stream_ws);
@@ -555,15 +631,18 @@ static ssize_t live_write(struct file *f, const char __user *ubuf, size_t len, l
 		return -EFAULT;
 	cmd[n] = 0;
 	strim(cmd);
-	if (!strcmp(cmd, "rear") || !strcmp(cmd, "rearfull")) {
+	if (!strcmp(cmd, "rear") || !strcmp(cmd, "rearfull") ||
+	    !strcmp(cmd, "front") || !strcmp(cmd, "frontfull")) {
 		live_stop();
-		ret = live_start(strstr(cmd, "full") != NULL);
-	} else if (!strcmp(cmd, "front") || !strcmp(cmd, "frontfull") ||
-		   !strcmp(cmd, "ap15") || !strcmp(cmd, "ap24")) {
-		ret = -ENODEV;
+		ret = live_start(cmd[0] == 'f' ? &cam_front : &cam_rear, strstr(cmd, "full") != NULL);
+	} else if (!strcmp(cmd, "ap15") || !strcmp(cmd, "ap24")) {
+		ret = -ENODEV;				/* the M20 has no aperture */
 	} else if (sscanf(cmd, "af %u", &c) == 1) {
 		mutex_lock(&lock);
-		ret = live_task && c <= 511 ? af_goto(c * 2) : -EINVAL;
+		if (live_task && cur == &cam_front)
+			ret = 0;			/* fixed focus */
+		else
+			ret = live_task && c <= 511 ? af_goto(c * 2) : -EINVAL;
 		mutex_unlock(&lock);
 	} else if (!strcmp(cmd, "stop")) {
 		live_stop();
@@ -681,7 +760,7 @@ static struct miscdevice live_misc = {
 /* --- module --- */
 static void unmap_all(void)
 {
-	void __iomem **m[] = { &top, &pmu, &sysreg, &csis, &dmac, &pin };
+	void __iomem **m[] = { &top, &pmu, &sysreg, &csis_rear, &csis_front, &dmac, &pin };
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(m); i++)
@@ -695,7 +774,7 @@ static void buses_down(void)
 {
 	int i;
 
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < NBUS; i++) {
 		if (bus[i]) {
 			i2c_put_adapter(bus[i]);
 			bus[i] = NULL;
@@ -715,10 +794,12 @@ static int __init m20cam_init(void)
 	top = ioremap(0x12060000, 0x3000);
 	pmu = ioremap(0x11c80000, 0x1000);
 	sysreg = ioremap(0x14510000, 0x1000);
-	csis = ioremap(0x14410000, 0x2000);
+	csis_rear = ioremap(0x14410000, 0x2000);
+	csis_front = ioremap(0x14400000, 0x2000);
+	csis = csis_rear;
 	dmac = ioremap(0x14440000, 0x1000);
 	pin = ioremap(0x139b0000, 0x1000);
-	if (!top || !pmu || !sysreg || !csis || !dmac || !pin) {
+	if (!top || !pmu || !sysreg || !csis_rear || !csis_front || !dmac || !pin) {
 		ret = -ENOMEM;
 		goto err_map;
 	}
@@ -742,13 +823,25 @@ static int __init m20cam_init(void)
 	gpiod_add_lookup_table(&ctl_gpios);
 	reset_gpio = gpiod_get(ctl_dev, "reset", GPIOD_OUT_LOW);
 	afen_gpio = IS_ERR(reset_gpio) ? NULL : gpiod_get(ctl_dev, "afen", GPIOD_OUT_LOW);
-	if (IS_ERR_OR_NULL(reset_gpio) || IS_ERR_OR_NULL(afen_gpio)) {
-		ret = IS_ERR(reset_gpio) ? PTR_ERR(reset_gpio) : afen_gpio ? PTR_ERR(afen_gpio) : -ENODEV;
-		reset_gpio = afen_gpio = NULL;
+	freset_gpio = IS_ERR_OR_NULL(afen_gpio) ? NULL : gpiod_get(ctl_dev, "freset", GPIOD_OUT_LOW);
+	if (IS_ERR_OR_NULL(reset_gpio) || IS_ERR_OR_NULL(afen_gpio) || IS_ERR_OR_NULL(freset_gpio)) {
+		ret = -ENODEV;
+		if (IS_ERR(reset_gpio))
+			ret = PTR_ERR(reset_gpio);
+		else if (IS_ERR(afen_gpio))
+			ret = PTR_ERR(afen_gpio);
+		else if (IS_ERR(freset_gpio))
+			ret = PTR_ERR(freset_gpio);
+		if (IS_ERR(reset_gpio))
+			reset_gpio = NULL;
+		if (IS_ERR(afen_gpio))
+			afen_gpio = NULL;
+		if (IS_ERR(freset_gpio))
+			freset_gpio = NULL;
 		goto err_gpio;
 	}
 	request_module("i2c-gpio");
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < NBUS; i++) {
 		gpiod_add_lookup_table(bus_gpios[i]);
 		bus_pdev[i] = platform_device_register_data(NULL, "i2c-gpio", BUS_ID0 + i,
 							    &bus_pdata, sizeof(bus_pdata));
@@ -768,8 +861,9 @@ static int __init m20cam_init(void)
 	ret = misc_register(&live_misc);
 	if (ret)
 		goto err_ws;
-	pr_info("zrn-m20cam: rear camera on /dev/zrn-cam, %zu MiB of frames at %pad, CSIS1 %08x\n",
-		(size_t)LIVE_SIZE >> 20, &live_dma, readl(csis + CSIS_VERSION));
+	pr_info("zrn-m20cam: rear and front on /dev/zrn-cam, %zu MiB of frames at %pad, CSIS1 %08x CSIS0 %08x
+",
+		(size_t)LIVE_SIZE >> 20, &live_dma, readl(csis_rear + CSIS_VERSION), readl(csis_front + CSIS_VERSION));
 	return 0;
 
 err_ws:
@@ -781,6 +875,8 @@ err_gpio:
 		gpiod_put(reset_gpio);
 	if (afen_gpio)
 		gpiod_put(afen_gpio);
+	if (freset_gpio)
+		gpiod_put(freset_gpio);
 	gpiod_remove_lookup_table(&ctl_gpios);
 	dma_free_coherent(ctl_dev, LIVE_SIZE, live_buf, live_dma);
 err_dev:
@@ -798,6 +894,7 @@ static void __exit m20cam_exit(void)
 	buses_down();
 	gpiod_put(reset_gpio);
 	gpiod_put(afen_gpio);
+	gpiod_put(freset_gpio);
 	gpiod_remove_lookup_table(&ctl_gpios);
 	dma_free_coherent(ctl_dev, LIVE_SIZE, live_buf, live_dma);
 	platform_device_unregister(ctl_pdev);
@@ -807,6 +904,6 @@ static void __exit m20cam_exit(void)
 module_init(m20cam_init);
 module_exit(m20cam_exit);
 MODULE_SOFTDEP("pre: i2c-gpio");
-MODULE_DESCRIPTION("Galaxy M20 rear camera (S5K3L6) as /dev/zrn-cam, RAW through CSIS1");
+MODULE_DESCRIPTION("Galaxy M20 rear (S5K3L6) and front (S5K4HA) cameras as /dev/zrn-cam, RAW through CSIS");
 MODULE_LICENSE("GPL");
 MODULE_IMPORT_NS("DMA_BUF");

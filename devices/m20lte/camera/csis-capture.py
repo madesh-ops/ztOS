@@ -52,11 +52,16 @@ def say(s):
 
 
 def sensor(f):
-    subprocess.run([HERE + "/bbi2c", "/dev/gpiochip25", "2", "3", "0x2d", "batch", HERE + "/" + f], check=True)
+    subprocess.run([HERE + "/bbi2c", "/dev/gpiochip25", SBUS[0], SBUS[1], "0x2d", "batch", HERE + "/" + f], check=True)
 
 
-W, H, RAW10 = 1052, 780, 0x2B
-SETTLE = int(sys.argv[1]) if len(sys.argv) > 1 else 26
+FRONT = os.environ.get("CAM") == "front"
+# rear: S5K3L6, CSIS1, PHY m0s4A (PMU 0x680, SYSREG_CAM 0x840 bit 8), "DMA1 only";
+# front: S5K4HA, CSIS0, PHY m0s4B (PMU 0x67c, bit 16), "DMA0 only" (csi_hw_s_dma_common_dynamic)
+CSIS_BASE, ISO, RST, SBUS, SPFX, PWR = ((0x14400000, 0x67c, 16, ("0", "1"), "4ha", "front-power.sh") if FRONT
+    else (0x14410000, 0x680, 8, ("2", "3"), "3l6", "rear-power.sh"))
+W, H, RAW10 = (1632, 1224, 0x2B) if FRONT else (1052, 780, 0x2B)
+SETTLE = int(sys.argv[1]) if len(sys.argv) > 1 else (14 if FRONT else 26)
 BARS = (sys.argv[2] if len(sys.argv) > 2 else "bars") == "bars"
 POL7885 = (sys.argv[3] if len(sys.argv) > 3 else "v5") == "7885"   # v5: DISABLE bit 0 = enabled
 AF = int(sys.argv[4]) if len(sys.argv) > 4 else None   # DW9808 lens position 0 (infinity) .. 1023 (macro)
@@ -66,7 +71,7 @@ BUF[:] = bytes([0xa5]) * (24 << 20)
 top = region(0x12060000, 0x3000)
 pmu = region(0x11c80000, 0x1000)
 sysreg = region(0x14510000, 0x1000)
-csis = region(0x14410000, 0x2000)
+csis = region(CSIS_BASE, 0x2000)
 dmac = region(0x14440000, 0x1000)                   # CSIS-DMA common (fimc_is reg 0)
 
 
@@ -78,20 +83,20 @@ def stage_g():
     wr(csis, 0x704, v & ~0x1f)                       # D-PHY clock and data lanes off
     wr(csis, 0x04, rd(csis, 0x04) & ~1)              # CSI off
     try:
-        sensor("3l6-off.txt")
+        sensor(SPFX + "-off.txt")
     except Exception as e:
         say("   sensor off failed: %s" % e)
-    subprocess.run([HERE + "/rear-power.sh", "off"], stdout=subprocess.DEVNULL)
-    wr(sysreg, 0x840, rd(sysreg, 0x840) & ~(1 << 8))  # PHY reset
-    wr(pmu, 0x680, rd(pmu, 0x680) & ~1)              # PHY isolated
+    subprocess.run([HERE + "/" + PWR, "off"], stdout=subprocess.DEVNULL)
+    wr(sysreg, 0x840, rd(sysreg, 0x840) & ~(1 << RST))  # PHY reset
+    wr(pmu, ISO, rd(pmu, ISO) & ~1)              # PHY isolated
     wr(top, 0x200c, 0x200000)
     say("   CMN %#x DPHY %#x, PMU 0x680 %#x, SYSREG 0x840 %#x" % (
-        rd(csis, 0x04), rd(csis, 0x704), rd(pmu, 0x680), rd(sysreg, 0x840)))
+        rd(csis, 0x04), rd(csis, 0x704), rd(pmu, ISO), rd(sysreg, 0x840)))
 
 
 say("A: rear camera on, sensor init (not streaming)")
-subprocess.run([HERE + "/rear-power.sh", "on"], check=True, stdout=subprocess.DEVNULL)
-sensor("3l6-init.txt")
+subprocess.run([HERE + "/" + PWR, "on"], check=True, stdout=subprocess.DEVNULL)
+sensor(SPFX + "-init.txt")
 
 
 def af(*args):
@@ -109,12 +114,12 @@ if AF is not None:
 try:
     wr(top, 0x200c, 0x300000)                        # CAM bus clock held on
     say("B: PHY isolation bypass and reset release (PMU 0x680 %#x, SYSREG 0x840 %#x)" % (
-        rd(pmu, 0x680), rd(sysreg, 0x840)))
-    wr(pmu, 0x680, rd(pmu, 0x680) | 1)
+        rd(pmu, ISO), rd(sysreg, 0x840)))
+    wr(pmu, ISO, rd(pmu, ISO) | 1)
     v = rd(sysreg, 0x840)
-    wr(sysreg, 0x840, v & ~(1 << 8))
-    wr(sysreg, 0x840, v | (1 << 8))
-    say("   now PMU 0x680 %#x, SYSREG 0x840 %#x" % (rd(pmu, 0x680), rd(sysreg, 0x840)))
+    wr(sysreg, 0x840, v & ~(1 << RST))
+    wr(sysreg, 0x840, v | (1 << RST))
+    say("   now PMU 0x680 %#x, SYSREG 0x840 %#x" % (rd(pmu, ISO), rd(sysreg, 0x840)))
 
     say("C: CSIS1 software reset (CMN %#x)" % rd(csis, 0x04))
     wr(csis, 0x04, rd(csis, 0x04) | 2)
@@ -156,9 +161,9 @@ try:
     # csi_hw_s_dma_common_dynamic for "DMA1 only" (CSIS1): CSIS1 first in arbitration,
     # Q-channel clock on (IP_PROCESSING), SRAM0 split 4 (CSIS1 gets the rest of SRAM0
     # in matrix 0), SRAM1 split 320, matrix 0
-    wr(dmac, 0x0, (rd(dmac, 0x0) & ~3) | 2)
+    wr(dmac, 0x0, (rd(dmac, 0x0) & ~3) | (1 if FRONT else 2))
     wr(dmac, 0x8, rd(dmac, 0x8) | 2)
-    wr(dmac, 0xc, (320 << 16) | 4)
+    wr(dmac, 0xc, (320 << 16) | (640 if FRONT else 4))
     wr(dmac, 0x10, 0)
     say("   after: ARB %#x CTRL %#x SPLIT %#x MATRIX %#x" % (rd(dmac, 0x0), rd(dmac, 0x8), rd(dmac, 0xc), rd(dmac, 0x10)))
     say("   DMA_CMN_CTRL %#x -> 0 (no abort request)" % rd(csis, 0x1414))
@@ -169,7 +174,7 @@ try:
     say("F: sensor stream on, then 1 s of counters")
     wr(csis, 0x14, 0xffffffff)                       # clear latched sources
     wr(csis, 0x1c, 0xffffffff)
-    sensor("3l6-on-bars.txt" if BARS else ("3l6-on.txt" if sys.argv[2] == "scene" else "3l6-on-%s.txt" % sys.argv[2]))
+    sensor(SPFX + ("-on-bars.txt" if BARS else ("-on.txt" if sys.argv[2] == "scene" else "-on-%s.txt" % sys.argv[2])))
     for i in range(4):
         time.sleep(0.25)
         say("   t=%.2f FRM_CNT0 %d SRC0 %#010x SRC1 %#010x DMA_SRC %#010x DMA_ERR %#x ACT_CTRL %#x" % (
