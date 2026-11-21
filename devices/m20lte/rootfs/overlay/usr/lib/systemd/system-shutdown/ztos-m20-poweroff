@@ -1,0 +1,28 @@
+#!/bin/sh
+# The Galaxy M20 powers off by dropping PS_HOLD: PMU (0x11c80000) +
+# PS_HOLD_CONTROL 0x330c, bit 8 (data; bit 9 is the output enable; 0x5300
+# while running). The kernel has no power-off handler for it yet (the
+# syscon-poweroff node in exynos7904-m20lte.dts arrives with the next BOOT
+# image), so reboot(POWER_OFF) failed, systemd-shutdown exited and the kernel
+# panicked ("Attempted to kill init") and restarted - at an empty battery,
+# again and again. systemd-shutdown runs this with "poweroff" after the file
+# systems are unmounted or read-only, just before that call: drop PS_HOLD
+# here. With a charger in, the PMIC may keep the phone on and sboot starts
+# again, as stock does to show its charging screen.
+[ "$1" = poweroff ] || exit 0
+grep -q m20lte /proc/device-tree/compatible 2>/dev/null || exit 0
+# systemd starts the hooks in this folder together: let ztos-root-ro finish
+# making the root read-only first (up to 10 s), then cut the power
+i=0
+while [ $i -lt 100 ] && ! awk '$2 == "/" && $4 ~ /^ro(,|$)/ {f=1} END {exit !f}' /proc/mounts; do
+	sleep 0.1; i=$((i + 1))
+done
+sync
+echo '<6>ztos-shutdown: dropping PS_HOLD (power off)' > /dev/kmsg 2>/dev/null
+exec python3 -I -c '
+import mmap, os, struct
+fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+m = mmap.mmap(fd, 0x4000, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=0x11c80000)
+v = struct.unpack_from("<I", m, 0x330c)[0]
+struct.pack_into("<I", m, 0x330c, v & ~0x100)
+'

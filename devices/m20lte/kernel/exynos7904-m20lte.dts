@@ -754,6 +754,21 @@
 		mode-recovery = <0x12345674>;
 		mode-bootloader = <0x1234567d>;
 	};
+
+	/*
+	 * Power off: drop PS_HOLD, PMU + 0x330c (PS_HOLD_CONTROL) bit 8; it reads
+	 * 0x5300 while running (bit 9 output enable, bit 8 data). Without this
+	 * node the kernel has no power-off handler: reboot(POWER_OFF) failed and
+	 * a power-off (an empty battery) ended in "Attempted to kill init".
+	 * Until a BOOT image with it, /usr/lib/systemd/system-shutdown/
+	 * ztos-m20-poweroff drops PS_HOLD from user space.
+	 */
+	poweroff {
+		compatible = "syscon-poweroff";
+		offset = <0x330c>;
+		mask = <0x100>;
+		value = <0x0>;
+	};
 };
 
 &mmc_0 {
