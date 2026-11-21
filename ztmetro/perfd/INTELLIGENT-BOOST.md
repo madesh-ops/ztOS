@@ -129,3 +129,54 @@ IntelligentBoost alike. `/run/zrnperfd.ib` shows `power_ma`, `power_level`,
 `power_top` and `power_takes`; the journal logs each change ("power limit N").
 The display, modem and radios are outside its reach: with them alone over
 1000 mA, it sits at level 5.
+
+## Interaction lift (2026-11-21, Galaxy M20)
+
+The ladder follows load, so it is a second behind the user. On the Start screen it rests at idle0:
+on the M20 that holds the big cores at 936 MHz with only cpu6 open and the GPU at 343 MHz, so a
+launch from Start ran its first half second there. The lift is a short lease on top of the ladder
+(`zrnperfd.c`, "the interaction lift"):
+
+- **Triggers:**
+  - a finger on the touchscreen (1 s from its last event);
+  - `touch` on `/run/zrnperfd.ctl`, for input that does not come through `/dev/input`;
+  - `launch [MS]` (2 s, at most 3 s);
+  - a `motion MS` from ztmetro within 0.5 s of a touch. Start's own tile flips do not lift;
+  - a new app's `focus` (1 s).
+- **While it lasts:** at least the interactive rung: both big cores open up to 1.77 GHz, and the
+  little cores up to 1.48 GHz. Floors of 1.35 GHz on both clusters and 545 MHz on the GPU.
+  Afterwards the ladder's own rung and floors come back.
+- **Backs off:**
+  - the screen is off, or the profile is not balanced;
+  - the hottest sensor is within 6 °C of the first thermal mark (70 °C on the M20);
+  - the battery is at 15 % or less and not charging;
+  - the thermal or power limit holds the rung under interactive.
+
+  A lift already on ends at once. `lift off|on` switches it, and the setting is kept. The status
+  file shows `lift`, `lifted`, `lifts`, `lift_blocked`, `temp` and `battery`.
+- **Thermal limit on the M20:** Perf1 names its sensors cpu-thermal and gpu-thermal, not
+  big/little/gpu, so until now zrnperfd read none (`temps -1 -1 -1`) and its thermal limit never
+  moved. perfial now falls back to `cpu*` and `gpu*` sensors and takes Perf1's `thermal_marks`
+  (76/86/96 on the M20).
+- **Shell pid across restarts:** the status file keeps the shell's pid, and a restarted zrnperfd
+  takes it back if it is still ztmetro. Before, a restart left the GPU's limits alone until the
+  next session.
+
+Measured on the phone, lift off and on in alternating rounds, plugged in, 46-49 °C:
+
+- **Cold launches** (ztdevices, ztsound, ztpower; 6 rounds; a `touch` 80 ms before each launch,
+  as a finger on the tile would send):
+
+  | | lift off | lift on |
+  |---|---|---|
+  | `launched` to `showing app` (ztmetro.log) | 500 ms (sd 64) | 357 ms (sd 43), −29 % |
+  | the app's CPU time | about 735 ms | about 525 ms |
+
+  It was faster for each app: ztdevices 419 → 301 ms, ztsound 548 → 394 ms,
+  ztpower 534 → 375 ms.
+- **Scrolling in Settings** (10 synthetic flings per mode, each from rest): worst frame per fling
+  32 ms → 24 ms (29 ms without the first, cold fling). Flings with a frame over 25 ms, a missed
+  vblank: 8 of 10 → 1 of 10.
+- **Idle** (Start, 60 s, no touch): no lift fired, and time in state on both clusters and the GPU
+  matched with the lift off and on. The lift costs nothing at rest. Its floors last at most 3 s
+  past the last touch.

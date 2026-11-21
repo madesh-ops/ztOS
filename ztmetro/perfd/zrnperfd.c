@@ -28,6 +28,10 @@
  *				profile, which wins over the other two
  *	motion MS		the touch boost's lift, held for MS (at most 3 s):
  *				the shell animating on its own clock past a touch
+ *				(right after a touch it also renews the interaction lift)
+ *	touch			a touch that did not come through /dev/input
+ *	launch [MS]		an app is starting: the interaction lift for MS
+ *	lift on | off		the interaction lift (see there), kept across boots
  *
  * /run/zrnperfd.ctl is that pipe (anyone may write), /run/zrnperfd.status
  * says what is set, /var/lib/zrnperfd/state keeps it across boots.
@@ -419,6 +423,7 @@ enum boost { IDLE0, NOMINAL, INTERACTIVE, BIG, RAPID };
 static const char *const boost_names[] = { "idle0", "nominal", "interactive", "big", "rapid" };
 static int thermal_level;		/* the thermal limit (thermal_update): 0 cool, 1-3 marks passed */
 static enum boost boost = IDLE0;	/* the resting state: two cores near 1.3 GHz */
+static enum boost rung_applied(void);	/* boost, raised by the interaction lift */
 static bool boost_extreme;	/* rapid, and still pinned for a second */
 static bool led_lit;
 static long led_next;		/* when the light next changes; 0: not blinking */
@@ -511,7 +516,7 @@ static int big_count(void) {
 	int all = 0;
 	while (cluster_cpus[n_clusters - 1][all] >= 0) { all++; }
 	if (profile == PERFORMANCE && screen_on && thermal_level == 0) { return all; }
-	switch (boost) {
+	switch (rung_applied()) {
 	/* big: two cores. With all four up the cluster did 0.9 of a core's work
 	 * between them and the phone drew 1114 mA against 1015 mA with two
 	 * (screen-on battery log, 2026-10-26); rapid alone brings all four. */
@@ -677,6 +682,7 @@ static void led_white(bool on) {
 }
 
 static long little_floor, little_ceiling;	/* policy0's lowest step and current max */
+static long little_rest_min;	/* policy0's floor without the touch boost (apply: the lift's, or the lowest step) */
 static long touch_until;			/* touch boost on until then; 0: off */
 static long boost_ms(void);
 
@@ -727,7 +733,7 @@ static void touch_boost(void) {
 static void touch_release(void) {
 	char path[96];
 	snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_min_freq", clusters[0]);
-	put_long(path, little_floor);
+	put_long(path, little_rest_min > little_floor ? little_rest_min : little_floor);
 	touch_until = 0;
 }
 
@@ -782,9 +788,13 @@ static unsigned long rung_ups, rung_downs, ib_lifts;
  * or IntelligentBoost asked: at 70 C no rapid, at 76 C interactive at most, at
  * 82 C nominal. A level lets go 3 C under its mark. Added 2026-10-25, when V1
  * held the phone at rapid (37 % of the time) and it ran hot in the hand and on
- * the charger. */
-static const int thermal_marks[] = { 70, 76, 82 };	/* rapid -> big -> interactive -> nominal */
+ * the charger. Those are the S9's marks; a phone's Perf1 thermal_marks
+ * replace them (the M20's 76/86/96, its cpu-thermal trips). On the M20 the
+ * sensors are cpu-thermal and gpu-thermal, found by perfial_thermal; until
+ * 2026-11-21 none was read there and the limit never moved. */
+static int thermal_marks[] = { 70, 76, 82 };	/* rapid -> big -> interactive -> nominal */
 static int temps[3];			/* big, little, GPU, in C (-1 unread) */
+static int temp_hot = -1;		/* the hottest of them */
 
 static enum boost thermal_top(void) {
 	return (enum boost)(RAPID - thermal_level);
@@ -807,6 +817,10 @@ static bool thermal_update(void) {
 		}
 		if (temps[i] > hot) hot = temps[i];
 	}
+	temp_hot = hot;
+	for (int i = 0; i < 3; i++)
+		if (perfial_thermal_mark(i) > 0)
+			thermal_marks[i] = perfial_thermal_mark(i);
 	int level = thermal_level;
 	while (level < 3 && hot >= thermal_marks[level]) level++;
 	while (level > 0 && hot < thermal_marks[level - 1] - 3) level--;
@@ -891,6 +905,101 @@ static bool power_update(void) {
 	fprintf(stderr, "zrnperfd: %ld mA: power limit %d\n", power_ua / 1000, level);
 	power_level = level;
 	return true;
+}
+
+/* ---- the interaction lift ---------------------------------------------------
+ *
+ * The ladder above follows load, so it is a second behind whatever the user
+ * just asked for, and on the Start screen (nothing in front) it rests at idle0:
+ * on the M20 the big cores held at 936 MHz with only cpu6 open, the GPU at
+ * 343 MHz. A launch from Start ran all of its first half second there.
+ *
+ * The lift is a short lease, renewed by what the user does:
+ *	a finger on the screen		1 s from its last event
+ *	"touch"				the same, for input that does not come
+ *					through /dev/input (ztmetro.ctl's taps)
+ *	"launch [MS]"			an app is starting: 2 s (at most 3 s)
+ *	"motion MS" right after a touch	the animation the touch started (the
+ *					tiles leaving, a page settling); Start's
+ *					own flips, nobody touching, do not lift
+ *	"focus" on a new app		1 s for its first frames
+ * While it lasts the rung is at least interactive (both big cores open, their
+ * ceiling the M20's top 1.77 GHz, the little cores up to 1.48 GHz) and the
+ * clocks have floors: both clusters 1.35 GHz, the GPU 545 MHz (the step under
+ * 65 % of its top). When it ends the ladder's own rung and floors come back.
+ *
+ * No lift, and a lift already on ends, when: the screen is off, the profile is
+ * not balanced (performance is at the top already, power saver never lifts),
+ * the hottest sensor is within 6 C of the first thermal mark (70 C on the
+ * M20), the battery is at 15 % or less and not charging, or the thermal or
+ * power limit holds the rung under interactive. "lift off" turns it off (and
+ * is kept across restarts), to compare. */
+#define LIFT_TOUCH_MS	1000
+#define LIFT_LAUNCH_MS	2000
+#define LIFT_FOCUS_MS	1000
+#define LIFT_MAX_MS	3000
+#define LIFT_MOTION_AFTER_TOUCH_MS 500	/* a motion this soon after a touch: the touch's */
+#define LIFT_RUNG	INTERACTIVE
+#define LIFT_LITTLE_KHZ	1350000
+#define LIFT_BIG_KHZ	1350000
+#define LIFT_GPU_SHARE	0.65
+#define LIFT_HOT_MARGIN	6	/* C under the first thermal mark */
+#define LIFT_LOW_BATTERY 15	/* percent, on battery */
+
+static bool lift_enabled = true;
+static long lift_until;		/* the lift is on until then; 0: off */
+static long touch_last;		/* the last touch event (boost_ms) */
+static unsigned long lift_count;
+static const char *lift_blocked = "";	/* why the last lift was refused */
+static int battery_pct = -1;
+
+static int battery_percent(void) {
+	static long read_at;
+	long now = boost_ms();
+	if (read_at && now - read_at < 10000) {
+		return battery_pct;	/* a fuel gauge read is an I2C transfer: every 10 s */
+	}
+	read_at = now;
+	FILE *f = fopen(perfial_battery_capacity(), "r");
+	battery_pct = -1;
+	if (f) {
+		if (fscanf(f, "%d", &battery_pct) != 1) battery_pct = -1;
+		fclose(f);
+	}
+	return battery_pct;
+}
+
+static bool lift_allowed(void) {
+	const char *why = !lift_enabled ? "off" : !screen_on ? "screen" : profile != BALANCED ? "profile" :
+		temp_hot >= thermal_marks[0] - LIFT_HOT_MARGIN ? "hot" :
+		!plugged && battery_percent() >= 0 && battery_pct <= LIFT_LOW_BATTERY ? "battery" :
+		limit_top() < LIFT_RUNG ? "limit" : "";
+	lift_blocked = why;
+	return !why[0];
+}
+
+/* lift for `ms` from now (or keep a longer lease). Returns 2 when it just
+ * started (the limits to apply), 1 when only the reason it was refused
+ * changed (the status to write), else 0: command()'s values. */
+static int lift_start(long ms) {
+	static const char *said = "";
+	bool ok = lift_allowed();
+	int status = lift_blocked != said ? 1 : 0;
+	said = lift_blocked;
+	if (!ok) {
+		return status;
+	}
+	if (ms > LIFT_MAX_MS) ms = LIFT_MAX_MS;
+	long until = boost_ms() + ms;
+	bool started = !lift_until;
+	if (until > lift_until) lift_until = until;
+	if (started) lift_count++;
+	return started ? 2 : status;
+}
+
+/* the rung the limits are set for: the ladder's, raised by the lift */
+static enum boost rung_applied(void) {
+	return lift_until && boost < LIFT_RUNG ? LIFT_RUNG : boost;
 }
 
 /* Look at what the app in front and the shell have used since the last look,
@@ -1015,7 +1124,9 @@ static bool boost_sample(void) {
 
 static void apply(void) {
 	bool low = !screen_on && deepsleep;
-	bool idle0 = boost == IDLE0;	/* the resting state, screen on or off */
+	enum boost rung = rung_applied();	/* the ladder's, or the lift's when higher */
+	bool lifted = lift_until != 0;
+	bool idle0 = rung == IDLE0;	/* the resting state, screen on or off */
 	char path[160];
 	long table[32];
 	/* the cores up now or after this change, whichever is more: the
@@ -1045,7 +1156,7 @@ static void apply(void) {
 		}
 		/* each rung's ceiling: little cores at their efficient top until
 		 * rapid; the big cluster climbing 1.07 -> 1.8 -> 2.3 GHz -> top */
-		bool top_speed = (profile == PERFORMANCE && screen_on && thermal_level == 0) || boost == RAPID;
+		bool top_speed = (profile == PERFORMANCE && screen_on && thermal_level == 0) || rung == RAPID;
 		long max;
 		if (top_speed) {
 			max = table[n - 1];
@@ -1054,8 +1165,8 @@ static void apply(void) {
 		} else if (!big) {
 			max = nearest(table, n, LITTLE_KHZ);
 		} else {
-			max = nearest(table, n, boost == BIG ? BIG_BIG_KHZ :
-				boost == INTERACTIVE ? BIG_INTERACTIVE_KHZ : BIG_NOMINAL_KHZ);
+			max = nearest(table, n, rung == BIG ? BIG_BIG_KHZ :
+				rung == INTERACTIVE ? BIG_INTERACTIVE_KHZ : BIG_NOMINAL_KHZ);
 		}
 		if (profile == POWERSAVE) {
 			long cap = capped(table, n, 0.65);
@@ -1072,14 +1183,28 @@ static void apply(void) {
 					fit = table[i];
 			max = fit;
 		}
+		/* the floor: the lift's while it lasts, and the touch boost's on
+		 * the little cores while that lasts; never above the ceiling */
+		long min = lifted ? (big ? LIFT_BIG_KHZ : LIFT_LITTLE_KHZ) : table[0];
 		if (c == 0) {
 			little_floor = table[0];
 			little_ceiling = max;
+			little_rest_min = min > max ? max : min;
+			if (touch_until && TOUCH_BOOST_KHZ > min) min = TOUCH_BOOST_KHZ;
 		}
+		if (min > max) min = max;
 		snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_governor", clusters[c]);
 		put(path, top_speed && !idle0 ? "performance" : "schedutil");
+		/* the floor down first, then the ceiling, then the floor up: the
+		 * two never cross on the way */
+		snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_min_freq", clusters[c]);
+		put_long(path, table[0]);
 		snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_max_freq", clusters[c]);
 		put_long(path, max);
+		if (min > table[0]) {
+			snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_min_freq", clusters[c]);
+			put_long(path, min);
+		}
 	}
 	/* Every change of frequency stalls this SoC for about 3 ms while the PLL
 	 * relocks; 8 ms still lets the clock follow a swipe instead of trailing it */
@@ -1112,6 +1237,8 @@ static void apply(void) {
 		 * the next frames took two vblanks each (Start's tiles coming back
 		 * from an app). The GPU still idles between frames at any clock */
 		long floor = screen_on ? (rest < max ? rest : max) : table[0];
+		if (lifted && capped(table, n, LIFT_GPU_SHARE) > floor)
+			floor = capped(table, n, LIFT_GPU_SHARE) < max ? capped(table, n, LIFT_GPU_SHARE) : max;
 		/* lower the floor before the ceiling, and raise them the other way */
 		put_long(perfial_gpu_file("min_freq"), table[0]);
 		put_long(perfial_gpu_file("max_freq"), max);
@@ -1163,8 +1290,14 @@ static void apply(void) {
 		if (system("/usr/local/sbin/zrn-charge >/dev/null 2>&1 &") != 0) {
 		}
 	}
-	fprintf(stderr, "zrnperfd: %s, boost %s, deep sleep %s, screen %s\n", names[profile],
-		boost_names[boost], deepsleep ? "on" : "off", screen_on ? "on" : "off");
+	/* the journal: the ladder's moves, not every lift (one a touch) */
+	static int said = -1;
+	int now_said = boost | profile << 4 | deepsleep << 8 | screen_on << 9;
+	if (now_said != said) {
+		said = now_said;
+		fprintf(stderr, "zrnperfd: %s, boost %s, deep sleep %s, screen %s\n", names[profile],
+			boost_names[boost], deepsleep ? "on" : "off", screen_on ? "on" : "off");
+	}
 }
 
 /* /run/zrnperfd.ib: both halves of the boost, and the network's last pass */
@@ -1203,6 +1336,10 @@ static void status(void) {
 		fprintf(f, "cpus=%d\nclusters=%d\n", cpu_count, n_clusters);
 		fprintf(f, "condition=%s\nboost=%s\n", conditions[condition()], boost_names[boost]);
 		fprintf(f, "wifi=%s\n", wifi_asleep ? "sleeping" : "on");
+		fprintf(f, "shell=%d\n", shell_pid);
+		fprintf(f, "lift=%s\nlifted=%s\nlifts=%lu\nlift_blocked=%s\ntemp=%d\nbattery=%d\n",
+			lift_enabled ? "on" : "off", lift_until ? "yes" : "no", lift_count,
+			lift_blocked[0] ? lift_blocked : "-", temp_hot, battery_pct);
 		fprintf(f, "ib=%s\nib_engine=%s\nib_rung=%s\n", ib_names[ib_mode], ibnet_engine(),
 			ib_last >= 0 ? boost_names[ib_last] : "-");
 		for (int c = 0; c < 3; c++) {
@@ -1222,6 +1359,7 @@ static void save(void) {
 		fprintf(f, "profile %s\ndeepsleep %s\n", names[profile], deepsleep ? "on" : "off");
 		fprintf(f, "ib %s\n", ib_names[ib_mode]);
 		fprintf(f, "ib engine %s\n", ibnet_using_score() ? "score" : "cpu");
+		fprintf(f, "lift %s\n", lift_enabled ? "on" : "off");
 		for (int c = 0; c < 3; c++) {
 			fprintf(f, "tickle %s %s\n", conditions[c], tickle_names[tickle_when[c]]);
 		}
@@ -1229,11 +1367,43 @@ static void save(void) {
 	}
 }
 
+/* A finger came down (`down`) or moved: the touch boost, the input boost in
+ * an app, and the lift. Returns 2 when the limits need applying. */
+static int touched(bool down) {
+	touch_last = boost_ms();
+	touch_boost();
+	int changed = lift_start(LIFT_TOUCH_MS);
+	/* input boost: a finger on an app means frames are about to be wanted;
+	 * open the second big core now rather than after a second of load (the
+	 * first frames of a scroll were janky). The usual 3 s of calm brings it
+	 * back down. */
+	if (down && boost_live() && front_pid > 0 && boost < INTERACTIVE && profile != POWERSAVE) {
+		boost = INTERACTIVE;
+		changed = 2;
+	}
+	return changed;
+}
+
 /* 0: nothing changed, 1: the status, 2: the limits too */
 static int command(char *line, bool persist) {
 	char what[32] = "", value[32] = "", extra[64] = "";
-	if (sscanf(line, "%31s %31s %63s", what, value, extra) < 2) {
+	int words = sscanf(line, "%31s %31s %63s", what, value, extra);
+	/* the lift's hints (see "the interaction lift"); never saved */
+	if (words >= 1 && strcmp(what, "touch") == 0) {
+		return touched(true);
+	}
+	if (words >= 1 && strcmp(what, "launch") == 0) {
+		long ms = words >= 2 ? atol(value) : LIFT_LAUNCH_MS;
+		return lift_start(ms > 0 ? ms : LIFT_LAUNCH_MS);
+	}
+	if (words < 2) {
 		return 0;
+	}
+	if (strcmp(what, "lift") == 0) {	/* lift on | off */
+		lift_enabled = strcmp(value, "off") != 0;
+		if (!lift_enabled) lift_until = 0;
+		if (persist) save();
+		return 2;
 	}
     if (strcmp(what, "compile") == 0) {
         pid_t pid = atoi(value);
@@ -1256,6 +1426,8 @@ static int command(char *line, bool persist) {
 			prioritise(front_pid, 0, 0);	/* back among the rest */
 			tree_release();
 		}
+		/* a new app in front: its first frames come under the lift */
+		bool lift_new = pid > 0 && pid != front_pid && pid != shell_pid && lift_start(LIFT_FOCUS_MS) == 2;
 		front_pid = pid;
 		snprintf(front_app, sizeof(front_app), "%s", pid > 0 ? extra : "");
 		for (char *c = front_app; *c; c++)
@@ -1266,7 +1438,7 @@ static int command(char *line, bool persist) {
 			prioritise(pid, FRONT_NICE, FRONT_UCLAMP);
 		}
 		tickle_focus(pid, extra[0] ? extra : "?");
-		return waydroid_front != was_waydroid ? 2 : 1;	/* 2: Android's cores follow it */
+		return waydroid_front != was_waydroid || lift_new ? 2 : 1;	/* 2: Android's cores follow it */
 	}
 	if (strcmp(what, "policy") == 0) {
 		pid_t pid = atoi(value);
@@ -1282,13 +1454,18 @@ static int command(char *line, bool persist) {
 	 * after the first unlock) longer than a touch boost lasts: hold it that long */
 	if (strcmp(what, "motion") == 0) {
 		long ms = atol(value);
+		int changed = 0;
 		if (ms > 0) {
 			touch_boost();
 			if (touch_until) {
 				touch_until = boost_ms() + (ms > 3000 ? 3000 : ms);
 			}
+			/* an animation a touch just started (not Start's own flips) */
+			if (touch_last && boost_ms() - touch_last <= LIFT_MOTION_AFTER_TOUCH_MS) {
+				changed = lift_start(ms);
+			}
 		}
-		return 0;
+		return changed;
 	}
 	if (strcmp(what, "shell") == 0) {
 		shell_pid = atoi(value);
@@ -1344,6 +1521,7 @@ static int command(char *line, bool persist) {
 	} else if (strcmp(what, "screen") == 0) {
 		screen_on = strcmp(value, "off") != 0;
 		persist = false;
+		if (!screen_on) lift_until = 0;
 		tickle_screen(screen_on);
 		if (screen_on) {
 			/* the screen takes the radio back at once; the timer stops */
@@ -1416,6 +1594,21 @@ int main(void) {
 			screen_on = strncmp(line + 7, "off", 3) != 0;
 		} else if (strncmp(line, "wifi=", 5) == 0) {
 			wifi_asleep = strncmp(line + 5, "sleeping", 8) == 0;
+		} else if (strncmp(line, "shell=", 6) == 0) {
+			/* and the shell, which says who it is only as it starts: without
+			 * it a restarted zrnperfd left the GPU's limits alone and the
+			 * shell at nice 0 until the next session */
+			char path[48], comm[32] = "";
+			int pid = atoi(line + 6);
+			snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+			FILE *c = pid > 0 ? fopen(path, "r") : NULL;
+			if (c) {
+				if (fgets(comm, sizeof(comm), c) && strncmp(comm, "ztmetro\n", 8) == 0) {
+					shell_pid = pid;
+					prioritise(shell_pid, SHELL_NICE, UI_UCLAMP);
+				}
+				fclose(c);
+			}
 		}
 	}
 	if (f) {
@@ -1496,6 +1689,12 @@ int main(void) {
 				wait = left < 1 ? 1 : (int)left;
 			}
 		}
+		if (lift_until) {
+			long left = lift_until - boost_ms();
+			if (wait < 0 || wait > left) {
+				wait = left < 1 ? 1 : (int)left;
+			}
+		}
 		if (poll(fds, n, wait) < 0 && errno != EINTR) {
 			break;
 		}
@@ -1514,25 +1713,19 @@ int main(void) {
 					}
 				}
 			}
-			/* every event keeps the boost (a drag, its lift): it ran out
-			 * 120 ms after touch-down, before the page had settled */
+			/* every event keeps the boost and the lift (a drag): the boost
+			 * ran out 120 ms after touch-down, before the page had settled */
 			if (any) {
-				touch_boost();
-			}
-			if (down) {
-				/* input boost: a finger on an app means frames are about to be
-				 * wanted; open the second big core now rather than after a
-				 * second of load (the first frames of a scroll were janky).
-				 * The usual 3 s of calm brings it back down. */
-				if (boost_live() && front_pid > 0 && boost < INTERACTIVE &&
-						profile != POWERSAVE) {
-					boost = INTERACTIVE;
-					changed = 2;
-				}
+				int c = touched(down);
+				changed = c > changed ? c : changed;
 			}
 		}
 		if (touch_until && boost_ms() >= touch_until) {
 			touch_release();
+		}
+		if (lift_until && boost_ms() >= lift_until) {
+			lift_until = 0;		/* the lease is up: the ladder's limits again */
+			changed = 2;
 		}
 		/* (the light wakes this loop more often than the load is looked at) */
 		static long sampled_at;
@@ -1577,6 +1770,11 @@ int main(void) {
 			}
 			if (thermal_update()) changed = 2;
 			if (power_update()) changed = 2;
+			/* hot, a low battery, the screen off, a limit: the lift ends now */
+			if (lift_until && !lift_allowed()) {
+				lift_until = 0;
+				changed = 2;
+			}
 			if (boost > limit_top()) {
 				boost = limit_top();
 				changed = 2;
@@ -1652,6 +1850,10 @@ int main(void) {
 	led_white(false);
 	if (wifi_asleep) {
 		wifi_radio(true);	/* nothing is left switched off behind us */
+	}
+	if (lift_until) {
+		lift_until = 0;
+		apply();	/* no lifted floors left behind */
 	}
 	if (touch_until) {
 		touch_release();

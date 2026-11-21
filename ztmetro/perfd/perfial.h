@@ -21,6 +21,11 @@ long perfial_cap(int policy, int online);
  * reads in degrees (true) or millidegrees */
 const char *perfial_thermal(const char *name);
 bool perfial_celsius(void);
+/* the phone's thermal marks, in C (the ladder's no-rapid, interactive-at-most
+ * and nominal-at-most temperatures); 0 when it names none */
+int perfial_thermal_mark(int i);
+/* the battery's charge in percent: "capacity" next to current_now */
+const char *perfial_battery_capacity(void);
 /* the GPU's devfreq node and the battery's current_now */
 const char *perfial_gpu(void);
 const char *perfial_battery_current(void);
