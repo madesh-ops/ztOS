@@ -45,6 +45,20 @@ from user space (GPIO character device, `/dev/mem`); nothing in the kernel yet.
   = 1 (isolation bypass), then SYSREG_CAM 0x14510840 bit 8 cleared and set (reset
   released). Front PHY: isolation 0x67c, reset bit 16; rear wide: 0x67c, bit 24.
 
+- 2026-11-21: **CSIS1 receives the rear camera at 120 fps** (`csis-count.py`). The
+  receiver uses Samsung's **v5.0 register layout** (matching VERSION 0x05010001),
+  not the v4.0 one the M20 kernel config names: PHY_STATUS 0x700, PHY_CMN_CTRL 0x704
+  (settle 24-31, S_CLKSETTLECTL 16-23 = 1, data lanes 1-4, clock lane 0); 0x20-0x3c
+  read 0xdeadcafe. PHY tuning registers 0x708+ stay at reset (Samsung sets them only
+  on the 8895). Sequence: PHY on (PMU 0x680, SYSREG 0x840 bit 8), CSIS reset, settle,
+  4 lanes (CMN 0x4300), ch0 RAW10 (CFG0 0x10ac), RESOL0 0x030c041c, shadow update,
+  clock lane on, CSI on, then sensor stream on. FRM_CNT_CH0 (0x100) +30 per 0.25 s.
+  INT_SRC0 0x01000104 every frame: FRAMESTART ch0, but also ERR_ECC (bit 2) and
+  ERR_LOST_FE ch0 (bit 8); INT_SRC1 0x1000. Settle 18-44 all give this; 6, 12 and 60
+  add ERR_SOT_HS. So the errors are not settle: format, pixel mode, lane order or
+  the sensor's extra data types are next to check, with a frame in memory.
+  No freeze in any run; everything is undone after each.
+
 ## Next
 
 1. Front and rear-wide IDs (same steps, their supplies and pins).

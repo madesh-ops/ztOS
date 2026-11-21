@@ -1,0 +1,4 @@
+# S5K3L6 stream off
+r8 0x0005
+w8 0x0100 0x00
+sleep 50000
