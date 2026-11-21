@@ -418,12 +418,50 @@ static struct task_struct *live_task;
 static DECLARE_COMPLETION(live_done);
 static void *live_buf;
 static dma_addr_t live_dma;
+static unsigned int buf_users;	/* open files and exported DMA-BUFs; under lock */
 static struct zrn_cam_frame live_info;
 static DEFINE_SPINLOCK(live_slock);
 static unsigned long live_read_at;
 static bool live_stop_asked;
 static size_t live_area;
 static unsigned int live_bufs, live_fll;
+
+/* The 48 MiB of frames come from CMA only while someone has /dev/zrn-cam open
+ * (or holds a DMA-BUF of it), so the camera costs no RAM when it isn't used. */
+static void buf_free(void)
+{
+	if (!live_buf)
+		return;
+	dma_free_coherent(ctl_dev, LIVE_SIZE, live_buf, live_dma);
+	live_buf = NULL;
+	pr_info("zrn-m20cam: frames freed\n");
+}
+
+static int buf_get(void)
+{
+	int ret = 0;
+
+	mutex_lock(&lock);
+	if (!live_buf) {
+		live_buf = dma_alloc_coherent(ctl_dev, LIVE_SIZE, &live_dma, GFP_KERNEL);
+		if (live_buf)
+			pr_info("zrn-m20cam: %zu MiB of frames at %pad\n", (size_t)LIVE_SIZE >> 20, &live_dma);
+		else
+			ret = -ENOMEM;
+	}
+	if (!ret)
+		buf_users++;
+	mutex_unlock(&lock);
+	return ret;
+}
+
+static void buf_put(void)
+{
+	mutex_lock(&lock);
+	if (!WARN_ON(!buf_users) && !--buf_users && !live_task)
+		buf_free();		/* else live_thread frees them when it ends */
+	mutex_unlock(&lock);
+}
 
 static void live_addr(unsigned int i)
 {
@@ -516,6 +554,8 @@ static int live_thread(void *d)
 	live_info.stopped = why;
 	spin_unlock(&live_slock);
 	live_task = NULL;
+	if (!buf_users)
+		buf_free();	/* the last user left while this was stopping */
 	mutex_unlock(&lock);
 	complete_all(&live_done);
 	return 0;
@@ -684,9 +724,15 @@ static int live_mmap(struct file *f, struct vm_area_struct *vma)
 	return dma_mmap_coherent(ctl_dev, vma, live_buf, live_dma, vma->vm_end - vma->vm_start);
 }
 
+static int live_open(struct inode *i, struct file *f)
+{
+	return buf_get();
+}
+
 static int live_release(struct inode *i, struct file *f)
 {
 	live_stop();
+	buf_put();
 	return 0;
 }
 
@@ -717,6 +763,7 @@ static void zc_unmap(struct dma_buf_attachment *at, struct sg_table *sgt, enum d
 
 static void zc_release(struct dma_buf *b)
 {
+	buf_put();
 }
 
 static int zc_mmap(struct dma_buf *b, struct vm_area_struct *vma)
@@ -740,9 +787,14 @@ static long live_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	info.priv = live_buf;
 	info.size = LIVE_SIZE;
 	info.flags = O_RDWR | O_CLOEXEC;
+	fd = buf_get();			/* the DMA-BUF keeps the frames after close() */
+	if (fd)
+		return fd;
 	b = dma_buf_export(&info);
-	if (IS_ERR(b))
+	if (IS_ERR(b)) {
+		buf_put();
 		return PTR_ERR(b);
+	}
 	fd = dma_buf_fd(b, O_CLOEXEC);
 	if (fd < 0)
 		dma_buf_put(b);
@@ -750,7 +802,7 @@ static long live_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 }
 
 static const struct file_operations live_fops = {
-	.owner = THIS_MODULE, .write = live_write, .read = live_read,
+	.owner = THIS_MODULE, .open = live_open, .write = live_write, .read = live_read,
 	.mmap = live_mmap, .release = live_release, .unlocked_ioctl = live_ioctl,
 };
 static struct miscdevice live_misc = {
@@ -815,11 +867,6 @@ static int __init m20cam_init(void)
 	ret = dma_coerce_mask_and_coherent(ctl_dev, DMA_BIT_MASK(32));
 	if (ret)
 		goto err_dev;
-	live_buf = dma_alloc_coherent(ctl_dev, LIVE_SIZE, &live_dma, GFP_KERNEL);
-	if (!live_buf) {
-		ret = -ENOMEM;
-		goto err_dev;
-	}
 	gpiod_add_lookup_table(&ctl_gpios);
 	reset_gpio = gpiod_get(ctl_dev, "reset", GPIOD_OUT_LOW);
 	afen_gpio = IS_ERR(reset_gpio) ? NULL : gpiod_get(ctl_dev, "afen", GPIOD_OUT_LOW);
@@ -861,8 +908,8 @@ static int __init m20cam_init(void)
 	ret = misc_register(&live_misc);
 	if (ret)
 		goto err_ws;
-	pr_info("zrn-m20cam: rear and front on /dev/zrn-cam, %zu MiB of frames at %pad, CSIS1 %08x CSIS0 %08x\n",
-		(size_t)LIVE_SIZE >> 20, &live_dma, readl(csis_rear + CSIS_VERSION), readl(csis_front + CSIS_VERSION));
+	pr_info("zrn-m20cam: rear and front on /dev/zrn-cam (frames allocated on open), CSIS1 %08x CSIS0 %08x\n",
+		readl(csis_rear + CSIS_VERSION), readl(csis_front + CSIS_VERSION));
 	return 0;
 
 err_ws:
@@ -877,7 +924,6 @@ err_gpio:
 	if (freset_gpio)
 		gpiod_put(freset_gpio);
 	gpiod_remove_lookup_table(&ctl_gpios);
-	dma_free_coherent(ctl_dev, LIVE_SIZE, live_buf, live_dma);
 err_dev:
 	platform_device_unregister(ctl_pdev);
 err_map:
@@ -895,7 +941,7 @@ static void __exit m20cam_exit(void)
 	gpiod_put(afen_gpio);
 	gpiod_put(freset_gpio);
 	gpiod_remove_lookup_table(&ctl_gpios);
-	dma_free_coherent(ctl_dev, LIVE_SIZE, live_buf, live_dma);
+	buf_free();		/* no users: a module isn't unloaded while files or DMA-BUFs are open */
 	platform_device_unregister(ctl_pdev);
 	unmap_all();
 }
