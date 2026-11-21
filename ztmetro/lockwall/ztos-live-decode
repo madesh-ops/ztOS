@@ -12,6 +12,10 @@
 # this runs at its pace, blocked on the full pipe in between, and is killed
 # when it is no longer wanted; with ztmetro gone, it ends on the broken pipe.
 #
+# A sample, lockwall/Cobalt flow.mp4 (12 s, 540x1170, H.264), is installed in
+# /usr/local/share/backgrounds/ztos/live; it was made with ffmpeg's gradients
+# source (type=spiral, the cobalt accent with teal and violet) and libx264.
+#
 # The Exynos MFC decodes H.264, HEVC, VP8/9 and MPEG-4 (ffmpeg's v4l2m2m
 # decoders, as mpv's hwdec=v4l2m2m-copy); the rest, or LIVE_HWDEC=no, on the
 # CPU. Measured on the M20, a 720x1280 frame: ~9 ms of CPU passed through,
