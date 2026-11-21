@@ -59,6 +59,7 @@ W, H, RAW10 = 1052, 780, 0x2B
 SETTLE = int(sys.argv[1]) if len(sys.argv) > 1 else 26
 BARS = (sys.argv[2] if len(sys.argv) > 2 else "bars") == "bars"
 POL7885 = (sys.argv[3] if len(sys.argv) > 3 else "v5") == "7885"   # v5: DISABLE bit 0 = enabled
+AF = int(sys.argv[4]) if len(sys.argv) > 4 else None   # DW9808 lens position 0 (infinity) .. 1023 (macro)
 PHYS = int(open("/sys/kernel/debug/zrn-m20cam/phys").read(), 16)
 BUF = mmap.mmap(os.open("/dev/zrn-m20cam", os.O_RDWR), 24 << 20)
 BUF[:] = bytes([0xa5]) * (24 << 20)
@@ -91,6 +92,20 @@ def stage_g():
 say("A: rear camera on, sensor init (not streaming)")
 subprocess.run([HERE + "/rear-power.sh", "on"], check=True, stdout=subprocess.DEVNULL)
 sensor("3l6-init.txt")
+
+
+def af(*args):
+    # the DW9808 at 0x0c (Samsung's 0x18 is the 8-bit form) on camera I2C 3, gpc1-6/7
+    subprocess.run([HERE + "/bbi2c", "/dev/gpiochip25", "6", "7", "0x0c", "w"] + [str(a) for a in args], check=True)
+
+
+if AF is not None:
+    say("A2: focus actuator init, lens to %d" % AF)
+    af(0x02, 0x01); af(0x02, 0x00); time.sleep(0.005)       # power-down out, wait 5 ms
+    af(0x02, 0x02)                                           # ringing control
+    af(0x06, 0x61); af(0x07, 0x36); af(0x0a, 0xff)           # SAC3, Tvib x1; SACT; preset
+    af(0x03, AF >> 8, AF & 0xff)                             # position
+    time.sleep(0.05)
 try:
     wr(top, 0x200c, 0x300000)                        # CAM bus clock held on
     say("B: PHY isolation bypass and reset release (PMU 0x680 %#x, SYSREG 0x840 %#x)" % (
@@ -172,7 +187,15 @@ try:
     first = None if first == len(data) else first
     say("   buffer: first changed byte %s, last changed byte %s (of %d)" % (first, last - 1 if first is not None else None, len(data)))
     if first is not None:
-        open("/tmp/m20cam-frame.raw", "wb").write(data[:4 << 20])
+        import array
+        g = array.array("H")
+        g.frombytes(data[:780 * 2112])
+        score = 0
+        for y in range(195, 585, 3):                         # centre half, every third line
+            row = g[y * 1056 + 263: y * 1056 + 789]
+            score += sum(abs(row[i + 2] - row[i]) for i in range(0, len(row) - 2, 2))
+        say("   sharpness %d" % score)
+        open("/tmp/m20cam-frame%s.raw" % ("" if AF is None else "-af%d" % AF), "wb").write(data[:4 << 20])
         say("   saved the first 4 MiB to /tmp/m20cam-frame.raw")
 finally:
     stage_g()

@@ -82,6 +82,17 @@ from user space (GPIO character device, `/dev/mem`); nothing in the kernel yet.
   analog gain 0x0204 = 0x80, 4x): median 120, highlights at 1023. Developed at half
   size (black 64, GRBG, grey-world gains R 1.34 B 1.25, gamma 2.2). Soft: the
   DW9808 focus actuator (0x18 on i2c ch 3) is not driven yet.
+- 2026-11-21: **focus** (`first-focused-photo.png`). The DW9808 answers at **0x0c**
+  (Samsung's 0x18 is the 8-bit form) on camera I2C 3, gpc1-6/7; info register 0xe1.
+  Init as `fimc-is-actuator-dw9808.c` without calibration: 0x02 = 1, 0x02 = 0, 5 ms,
+  0x02 = 2 (ring control), 0x06 = 0x61, 0x07 = 0x36, 0x0a = 0xff; the 10-bit position
+  in 0x03/0x04 (0 infinity .. 1023 macro). `csis-capture.py 26 exp 7885 POS` sets
+  it, waits 50 ms and prints a sharpness score (green gradients, centre half).
+  Hand-held sweep of a room at a few metres: 0: 308k, 128: 320k, 256: 165k, 384:
+  226k, 512: **342k**, 640: 229k, 768: 212k, 896: 212k, 1023: 210k (the phone moved
+  between frames, so only the extremes are clean comparisons); 512 is visibly
+  sharp, 0 and 1023 blurred. Also on bus 3: 0x51, 0x58, 0x59 (the module's
+  EEPROM, by Samsung's cal_memory = EEPROM; not read yet).
 
 ## Next
 
