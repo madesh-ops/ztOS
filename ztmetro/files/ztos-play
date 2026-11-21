@@ -1,0 +1,24 @@
+#!/bin/sh
+# ztos-play FILE: a video in mpv, full screen, as the Files app opens one
+# (ztfiles asks the shell to "launch ztos-play 'FILE'": the shell's control
+# lines are short, so mpv's options live here). mpv's own configuration
+# still applies: on the M20, hwdec=v4l2m2m-copy (the MFC).
+#
+# Rendering: --vo=gpu with --profile=fast. On the M20 (Mali-G71, Panfrost)
+# mpv's default gpu-next dropped ~250 of 420 frames of a 720x1280 60 fps
+# video in 7 s; gpu with the fast profile dropped 1.
+#
+# For a phone: mpv's own controller (sized for a desktop) is off, and
+# ztos-play.lua draws a touch one: a tap shows a big play/pause button,
+# -/+10 s beside it and a thick seek bar to drag; a double tap on either
+# side seeks 10 s, in the middle pauses. The shell's back button arrives as
+# Escape and quits (mpv-input.conf).
+[ $# -eq 1 ] || { echo "usage: $0 FILE" >&2; exit 2; }
+share=/usr/local/share/ztos
+extra=
+[ -r $share/mpv-input.conf ] && extra="$extra --input-conf=$share/mpv-input.conf"
+[ -r $share/ztos-play.lua ] && extra="$extra --script=$share/ztos-play.lua --osc=no"
+exec mpv --fs --force-window=immediate --keep-open=no \
+	--vo=gpu --profile=fast \
+	--osd-bar=no --osd-font-size=44 --osd-duration=800 \
+	$extra -- "$1"

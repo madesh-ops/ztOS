@@ -211,6 +211,9 @@ install: check-arch
 	install -Dm644 devices/ztdevices.desktop /usr/local/share/applications/ztdevices.desktop
 	install -Dm644 devices/ztdevices.svg /usr/local/share/icons/hicolor/scalable/apps/ztdevices.svg
 	install -Dm755 files/ztfiles /usr/local/bin/ztfiles
+	install -Dm644 files/mpv-input.conf /usr/local/share/ztos/mpv-input.conf
+	install -Dm755 files/ztos-play /usr/local/bin/ztos-play
+	install -Dm644 files/ztos-play.lua /usr/local/share/ztos/ztos-play.lua
 	install -Dm644 files/ztfiles.desktop /usr/local/share/applications/ztfiles.desktop
 	install -Dm644 files/ztfiles.svg /usr/local/share/icons/hicolor/scalable/apps/ztfiles.svg
 	install -Dm755 sound/ztsound /usr/local/bin/ztsound

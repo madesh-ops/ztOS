@@ -114,6 +114,69 @@ static bool has_suffix(const char *path, const char *suffix) {
 	return a >= b && strcasecmp(path + a - b, suffix) == 0;
 }
 
+/* ---- videos: played with mpv ----------------------------------------------
+ *
+ * A video (its type video/..., or a video file's name) opens straight in mpv,
+ * full screen, through the shell's launch (so it comes in as an app does,
+ * and the shell's back closes it: Escape is quit in mpv-input.conf). mpv's own
+ * configuration still applies: on the M20, hwdec=v4l2m2m-copy, the MFC. */
+#define PLAYER	"/usr/local/bin/ztos-play"	/* mpv with its options (files/ztos-play) */
+#define CTL_LINE_MAX	250	/* the shell reads its control pipe 256 bytes at a time */
+
+static bool is_video(const char *path) {
+	static const char *const suffixes[] = { ".mp4", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".3gp", ".ts",
+		".mpg", ".mpeg", ".wmv", ".flv", ".ogv" };
+	for (size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+		if (has_suffix(path, suffixes[i])) return true;
+	}
+	char *content_type = g_content_type_guess(path, NULL, 0, NULL);
+	char *mime = content_type ? g_content_type_get_mime_type(content_type) : NULL;
+	bool video = mime && strncmp(mime, "video/", 6) == 0;
+	g_free(mime);
+	g_free(content_type);
+	return video;
+}
+
+/* `text` in single quotes for sh, at `out`; false if it does not fit */
+static bool sh_quote(const char *text, char *out, size_t size) {
+	size_t n = 0;
+	if (size < 3) return false;
+	out[n++] = '\'';
+	for (; *text; text++) {
+		const char *piece = *text == '\'' ? "'\\''" : NULL;
+		size_t len = piece ? strlen(piece) : 1;
+		if (n + len + 2 > size) return false;
+		if (piece) { memcpy(out + n, piece, len); n += len; }
+		else out[n++] = *text;
+	}
+	out[n++] = '\'';
+	out[n] = 0;
+	return true;
+}
+
+static bool play_video(const char *path) {
+	char quoted[PATH_SIZE * 2], line[PATH_SIZE * 2 + 256];
+	if (!sh_quote(path, quoted, sizeof(quoted))) return false;
+	int n = snprintf(line, sizeof(line), "launch " PLAYER " %s\n", quoted);
+	bool short_enough = n > 0 && n < CTL_LINE_MAX && access(PLAYER, X_OK) == 0 && !strchr(path, '\n');
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	char ctl[512];
+	snprintf(ctl, sizeof(ctl), "%s/ztmetro.ctl", runtime ? runtime : "/run/user/1000");
+	int fd = short_enough ? open(ctl, O_WRONLY | O_NONBLOCK | O_CLOEXEC) : -1;
+	bool told = fd >= 0 && write(fd, line, (size_t)n) == n;
+	if (fd >= 0) close(fd);
+	if (told) return true;
+	/* no shell to ask (run on another desktop), or a path too long for its
+	 * control line: mpv by itself */
+	pid_t pid = fork();
+	if (pid == 0) {
+		setsid();
+		execlp("mpv", "mpv", "--fs", "--keep-open=no", "--", path, (char *)NULL);
+		_exit(127);
+	}
+	return pid > 0;
+}
+
 static void menu_open_file(const char *path) {
 	handlers_clear();
 	menu_count = 0;
@@ -369,6 +432,7 @@ static void activate(int action, int arg) {
 	}
 	if (action != ACT_FILE || arg < 0 || arg >= n_files || !path_for(files[arg].name, selected)) return;
 	if (has_suffix(selected, ".apk")) { child_start_inspect(selected); return; }
+	if (is_video(selected) && play_video(selected)) return;
 	menu_open_file(selected);
 }
 
@@ -412,7 +476,9 @@ int main(int argc, char **argv) {
 		if (slash && slash != path) { size_t n = (size_t)(slash-path); if (n < sizeof(location)) { memcpy(location,path,n); location[n]=0; } }
 		else if (slash == path) snprintf(location,sizeof(location),"/");
 		scan_location();
-		if (has_suffix(path,".apk")) child_start_inspect(path); else menu_open_file(path);
+		if (has_suffix(path,".apk")) child_start_inspect(path);
+		else if (is_video(path) && play_video(path)) return 0;	/* (opened only to play it) */
+		else menu_open_file(path);
 		return zmc_run(&app, 0);
 	}
 	scan_location();

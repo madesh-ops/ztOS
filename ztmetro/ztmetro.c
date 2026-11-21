@@ -372,6 +372,9 @@ struct zt_toplevel {
 	bool waydroid_boot;	/* temporary boot surface, never an app */
 	uint32_t commit_ms;	/* when it last committed a buffer */
 	char launch_command[256];	/* survives launcher exit / D-Bus handoff */
+	/* the app that was in front when this one was launched (Files opening
+	 * the video player): closing this one goes back to it, not to Start */
+	struct zt_toplevel *opener;
 	/* an SDK app, first time up: kept out of sight behind "Loading..." until
 	 * it says "ready" (its pages built, its entrance prepared), so that its
 	 * start-up work never shares the processor with an animation on screen */
@@ -924,6 +927,7 @@ struct zt_server {
 	/* an app asked for and not yet showing anything: "Loading..." and the dots,
 	 * as the phone's own, once Start has gone (0: none) */
 	char pending_command[256];
+	struct zt_toplevel *pending_opener;	/* in front as pending_command was launched */
 	pid_t pending_pid;
 	uint32_t loading_since;
 	struct zt_layer loading_text, loading_dot, compiling_text, compiling_bar;
@@ -9118,6 +9122,7 @@ static void launch(struct zt_server *server, const char *command) {
     server->pending_pid = pid;
     server->android_compiling = false;
     snprintf(server->pending_command, sizeof(server->pending_command), "%s", command);
+	server->pending_opener = server->shown;
 	server->launch_ms = launch_at;
 	server->loading_since = server->launch_ms;
 	wlr_log(WLR_INFO, "launched '%s' as %d", command, pid);
@@ -10219,6 +10224,8 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
         snprintf(toplevel->launch_command, sizeof(toplevel->launch_command), "%s",
             server->pending_command);
         server->pending_command[0] = 0;
+        toplevel->opener = server->pending_opener != toplevel ? server->pending_opener : NULL;
+        server->pending_opener = NULL;
         server->pending_pid = 0;
     server->android_compiling = false;
     }
@@ -10290,10 +10297,13 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		return;
 	}
 	if (server->shown == toplevel) {
-		/* Closing an app lands on Start, as it does on the phone. */
-		show_toplevel(server, NULL);
+		/* Closing an app lands on Start, as it does on the phone; one an
+		 * app opened (the video player from Files) goes back to that app */
+		struct zt_toplevel *back = toplevel->opener && toplevel->opener->mapped ? toplevel->opener : NULL;
+		show_toplevel(server, back);
 		server->leaving = NULL;	/* its buffer is gone: nothing to swing out */
 	}
+	toplevel->opener = NULL;
 	damage(server);
 }
 
@@ -10345,6 +10355,11 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	if (server->leaving == toplevel) {
 		server->leaving = NULL;
 	}
+	struct zt_toplevel *other;
+	wl_list_for_each(other, &server->toplevels, link) {
+		if (other->opener == toplevel) other->opener = NULL;
+	}
+	if (server->pending_opener == toplevel) server->pending_opener = NULL;
 	wl_list_remove(&toplevel->map.link);
 	wl_list_remove(&toplevel->unmap.link);
 	wl_list_remove(&toplevel->commit.link);
