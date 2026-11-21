@@ -36,6 +36,15 @@ from user space (GPIO character device, `/dev/mem`); nothing in the kernel yet.
 - `drivers/zrn-m20cam.c` (built by CI's modules_only run): 24 MiB at bus address
   0xd9900000 in CMA, mmap through /dev/zrn-m20cam, filled with 0xa5.
 
+- 2026-11-21: the S5K3L6 streams. `3l6-1052x780.txt` (Samsung setA Global + the
+  1052x780 120 fps "FAST AE" mode + `sensor_3l6_cis_stream_on`'s sequence) through
+  `bbi2c ... 0x2d batch`: frame counter 0x0005 went 0x0e, 0x28, 0x42 (26 frames per
+  ~220 ms, about 118 fps), 0x034c/0x034e read back 1052 x 780, 4 lanes (module).
+  It streams into the still isolated PHY; nothing receives it yet.
+- Rear PHY (Samsung `phy-exynos-mipi.c`, `samsung,mipi-phy-s4`): PMU 0x11c80680 bit 0
+  = 1 (isolation bypass), then SYSREG_CAM 0x14510840 bit 8 cleared and set (reset
+  released). Front PHY: isolation 0x67c, reset bit 16; rear wide: 0x67c, bit 24.
+
 ## Next
 
 1. Front and rear-wide IDs (same steps, their supplies and pins).

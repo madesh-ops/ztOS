@@ -157,6 +157,47 @@ int main(int argc, char **argv)
 		for (int i = 7; i < argc; i++)
 			if (!wbyte(strtol(argv[i], 0, 0))) { rc = 1; fprintf(stderr, "NACK on byte %d\n", i - 7); break; }
 		stop();
+	} else if (!strcmp(op, "batch")) {
+		/* argv[6] is a file: "w16 REG VAL", "w8 REG VAL", "r8 REG", "r16 REG",
+		 * "sleep US", "#" comments; 16-bit register addresses (sensors) */
+		FILE *f = fopen(argv[6], "r");
+		char line[128], cmd[16];
+		unsigned int a, v, n = 0;
+		if (!f) { perror(argv[6]); return 1; }
+		while (fgets(line, sizeof(line), f)) {
+			int k = sscanf(line, "%15s %i %i", cmd, &a, &v);
+			if (k < 2 || cmd[0] == '#')
+				continue;
+			if (!strcmp(cmd, "sleep")) {
+				struct timespec t = { a / 1000000, (a % 1000000) * 1000 };
+				nanosleep(&t, NULL);
+				continue;
+			}
+			int w16 = !strcmp(cmd, "w16"), w8 = !strcmp(cmd, "w8");
+			if ((w16 || w8) && k == 3) {
+				start();
+				int ok = wbyte(addr << 1) && wbyte(a >> 8) && wbyte(a & 0xff);
+				if (ok && w16)
+					ok = wbyte(v >> 8);
+				if (ok)
+					ok = wbyte(v & 0xff);
+				stop();
+				if (!ok) { fprintf(stderr, "NACK at %s 0x%04x\n", cmd, a); rc = 1; break; }
+				n++;
+			} else if (!strcmp(cmd, "r8") || !strcmp(cmd, "r16")) {
+				int len = cmd[1] == '1' ? 2 : 1, val = 0;
+				start();
+				wbyte(addr << 1); wbyte(a >> 8); wbyte(a & 0xff);
+				start();
+				wbyte((addr << 1) | 1);
+				for (int i = 0; i < len; i++)
+					val = (val << 8) | rbyte(i < len - 1);
+				stop();
+				printf("0x%04x: 0x%0*x\n", a, len * 2, val);
+			}
+		}
+		fclose(f);
+		fprintf(stderr, "%u writes\n", n);
 	} else {
 		return 2;
 	}
