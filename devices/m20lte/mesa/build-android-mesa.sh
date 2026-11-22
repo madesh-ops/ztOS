@@ -12,6 +12,11 @@
 #
 #   bash build-android-mesa.sh [WORKDIR]     -> WORKDIR/out/lib64/...
 #
+# Without such a computer: .github/workflows/android-mesa-m20.yml runs this in
+# an Arch container and keeps out/ as the artifact android-mesa-m20 (lib64/ and
+# SHA256SUMS). On the M20 (2026-11-22) it took Settings' worst 1% of frames
+# from 109 to 20 ms, janky frames from 5.7 to 1.1%, and ended 5 s GPU stalls.
+#
 # Then on the phone, as root: copy WORKDIR/out/. to /vendor/ztos/android-vendor/
 # and run /usr/share/ztos-waydroid/install.sh --config-only (patch-vendor.sh
 # lays that folder over the vendor image).
