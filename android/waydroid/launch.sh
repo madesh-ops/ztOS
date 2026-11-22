@@ -22,9 +22,6 @@ elif [[ $# == 1 && $1 =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]]; then
 else
     echo 'Usage: ztos-waydroid-launch PACKAGE | --full-ui | --install APK | --remove PACKAGE' >&2; exit 2
 fi
-# the window ztMETRO shows it in: "waydroid.PACKAGE", or "Waydroid"
-window_id=waydroid.$package
-[[ -z $full_ui ]] || window_id=Waydroid
 if [[ -n $install_apk ]]; then
     package=$(ztos-android inspect "$install_apk" | cut -f1)
 fi
@@ -32,6 +29,9 @@ fi
 [[ -n $full_ui || $package =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]] || {
     echo 'APK has no valid package name.' >&2; exit 2;
 }
+# the window ztMETRO shows it in: "waydroid.PACKAGE", or "Waydroid"
+window_id=waydroid.$package
+[[ -z $full_ui ]] || window_id=Waydroid
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-0}
 export DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}
