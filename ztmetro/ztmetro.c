@@ -7001,12 +7001,16 @@ static void run_detached(const char *program, const char *a1, const char *a2, co
  * once, straight through the recovery helper (Android's native cmd in the
  * container, 0.2 s) rather than ztos-android and waydroid shell (1.5 s). False
  * when it is no Android app. */
+/* When the shell last closed an Android app itself (switcher, recents) */
+static uint32_t waydroid_closed_ms;
+
 static bool waydroid_close(struct zt_toplevel *toplevel) {
 	const char *app_id = toplevel->xdg_toplevel->app_id;
 	if (!toplevel->android_runtime || !app_id || strncmp(app_id, "waydroid.", 9) != 0) {
 		return false;
 	}
 	run_detached("sh", "-c", "exec sudo -n /usr/local/libexec/ztos-waydroid-recover close \"$0\"", app_id + 9);
+	waydroid_closed_ms = now_ms() | 1;	/* what Android reveals next stays behind */
 	return true;
 }
 
@@ -10256,14 +10260,24 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     }
 	if (app_id && !strncmp(app_id, "waydroid.", 9) && !requested) {
 		const char *shown_id = server->shown ? server->shown->xdg_toplevel->app_id : NULL;
-		if (!server->shown && !server->locked && !strcmp(app_id, waydroid_front_gone_id) &&
-				now_ms() - waydroid_front_gone_ms < 1500) {
+		if (!server->shown && !server->locked &&
+				!(waydroid_closed_ms && now_ms() - waydroid_closed_ms < 5000) &&
+				(waydroid_rewaking || (waydroid_front_gone_ms && now_ms() - waydroid_front_gone_ms < 1500))) {
 			/* The app in front moved to a new window (Aurora Store after
-			 * its setup, an activity in a new task): Android drops one and
-			 * maps the other in the same breath. It stays in front. */
-			wlr_log(WLR_INFO, "Waydroid: '%s' came back in a new window", app_id);
-			snprintf(toplevel->launch_command, sizeof(toplevel->launch_command), "%s",
-				waydroid_front_gone_command);
+			 * its setup, an activity in a new task), or opened one of
+			 * another package: Android's install confirmation for an app
+			 * store (com.android.packageinstaller), a permission prompt, a
+			 * sign-in page. Android drops one window and maps the other in
+			 * the same breath. That one is in front, not kept behind Start
+			 * where nobody could answer it (Instagram's install from Aurora
+			 * was abandoned so, 2026-11-22). */
+			bool same = !strcmp(app_id, waydroid_front_gone_id);
+			wlr_log(WLR_INFO, "Waydroid: '%s' %s", app_id,
+				same ? "came back in a new window" : "opened by the app in front");
+			if (same)
+				snprintf(toplevel->launch_command, sizeof(toplevel->launch_command), "%s",
+					waydroid_front_gone_command);
+			waydroid_front_gone_ms = 0;
 			show_toplevel(server, toplevel);
 			return;
 		}

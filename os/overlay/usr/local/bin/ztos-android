@@ -356,11 +356,25 @@ def sync_waydroid():
         if package not in found and not package.startswith(WAYDROID_SYSTEM):
             icon = icons/(package+'.png')
             found[package] = (name, str(icon) if icon.exists() else 'applications-other')
+    if listed:
+        # Android's word over its launcher files, which Waydroid deletes
+        # some seconds after an uninstall (or never): an app no longer in
+        # the list is gone even while its file is still there.
+        found = {package: value for package, value in found.items() if package in listed}
     if not found and not any(applications.glob('waydroid.*.desktop')):
         return []	# Waydroid has not written its files (yet): change nothing
     registry = installed()
     changed = []
     for package, (name, icon) in found.items():
+        entry = registry.get(registry_key(package, 'waydroid'))
+        if entry and entry.get('synced') and (entry.get('name'), entry.get('icon')) != (name, icon) \
+                and icon != 'applications-other':
+            # Waydroid's launcher file (and the app's icon) can come a minute
+            # after the install that made this entry with a generic icon
+            entry['name'], entry['icon'] = name, icon
+            entry['listed'] = False
+            changed.append('~'+package)
+            continue
         if registry_key(package, 'waydroid') not in registry:
             registry[registry_key(package, 'waydroid')] = {
                 'package': package, 'name': name, 'runtime': 'waydroid', 'icon': icon, 'synced': True,
@@ -712,9 +726,14 @@ def main():
         else:
             launch(Path(metadata['apk']), args.arguments)
     elif args.command == 'sync':
-        for change in sync_waydroid(): print(change)
+        changes = sync_waydroid()
+        for change in changes: print(change)
         for metadata in installed().values():
             if metadata.get('runtime', 'atl') == 'atl': write_dbus_service(metadata['package'])
+        if changes:
+            # ztMETRO's app list: the new entries, or without the gone ones
+            runtime_dir = Path(os.environ.get('XDG_RUNTIME_DIR', '/run/user/'+str(os.getuid())))
+            pipe_message(runtime_dir/'ztmetro.ctl', 'apps')
     elif args.command == 'list':
         for _, metadata in sorted(installed().items()): print(metadata['package']+'\t'+metadata['name']+'\t'+metadata.get('runtime', 'atl'))
     elif args.command in ('uninstall', 'remove'):

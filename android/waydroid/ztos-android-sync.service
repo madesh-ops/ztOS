@@ -1,0 +1,12 @@
+[Unit]
+Description=ztOS: give Android apps installed inside Android their entries
+Documentation=file:///usr/local/share/doc/ztos-waydroid/README.md
+
+[Service]
+Type=oneshot
+# Android writes packages.list before the app's launcher activity is known
+# to `waydroid app list`; an install also rewrites it more than once.
+ExecStartPre=/bin/sleep 3
+ExecStart=/usr/local/bin/ztos-android sync
+Nice=10
+TimeoutStartSec=60

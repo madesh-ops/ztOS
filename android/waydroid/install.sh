@@ -72,6 +72,8 @@ install -Dm755 "$here/ztos-waydroid-boot" /usr/local/libexec/ztos-waydroid-boot
 install -Dm644 "$here/ztos-waydroid-network.service" /etc/systemd/system/ztos-waydroid-network.service
 install -Dm644 "$here/ztos-waydroid-session.service" /etc/systemd/user/ztos-waydroid-session.service
 install -Dm644 "$here/ztos-waydroid-boot.service" /etc/systemd/user/ztos-waydroid-boot.service
+install -Dm644 "$here/ztos-android-sync.path" /etc/systemd/user/ztos-android-sync.path
+install -Dm644 "$here/ztos-android-sync.service" /etc/systemd/user/ztos-android-sync.service
 mkdir -p /etc/systemd/system/waydroid-container.service.d
 cat > /etc/systemd/system/waydroid-container.service.d/ztos-recovery.conf <<'UNIT'
 [Service]
@@ -91,8 +93,10 @@ systemctl enable --now waydroid-container.service ztos-waydroid-network.service
 systemctl restart ztos-waydroid-network.service
 systemctl --global enable ztos-waydroid-audio-reconnect.service
 systemctl --global enable ztos-waydroid-boot.service
+systemctl --global enable ztos-android-sync.path
 if [[ -S $ZTOS_RUNTIME_DIR/bus ]]; then
     ztos_as_user systemctl --user daemon-reload
     ztos_as_user systemctl --user start ztos-waydroid-audio-reconnect.service
+    ztos_as_user systemctl --user start ztos-android-sync.path
 fi
 echo 'Installed. Waydroid starts at desktop boot; launch apps with ztos-waydroid-launch PACKAGE.'

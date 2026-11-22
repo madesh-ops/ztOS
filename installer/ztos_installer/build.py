@@ -255,7 +255,7 @@ rm -rf "$W"; install -d "$W"
 for f in install.sh strip-image.sh patch-init-wake-alarm.py patch-vendor.sh patch-composer.py waydroid.cfg network.py recover.sh \
 		audio-recover.py launch.sh power.sh ztos-waydroid-boot README.md \
 		ztos-waydroid-network.service ztos-waydroid-session.service ztos-waydroid-boot.service \
-		ztos-waydroid-audio-reconnect.service; do
+		ztos-waydroid-audio-reconnect.service ztos-android-sync.path ztos-android-sync.service; do
 	[ -e "$SRC/android/waydroid/$f" ] && cp -a "$SRC/android/waydroid/$f" "$W/"
 done
 install -Dm755 "$SRC/android/waydroid/ztos-waydroid-images" "$R/usr/lib/ztos/ztos-waydroid-images"

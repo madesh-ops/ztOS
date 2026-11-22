@@ -1,0 +1,17 @@
+[Unit]
+Description=ztOS: notice Android apps installed or removed inside Android
+Documentation=file:///usr/local/share/doc/ztos-waydroid/README.md
+
+# Android rewrites packages.list (in its data, which the host sees) on every
+# install, update and removal: from an app store inside Android (Aurora
+# Store), adb, or Android's own Settings. ztos-android install/remove keep
+# the registry themselves; this catches everything else.
+[Path]
+PathChanged=%h/.local/share/waydroid/data/system/packages.list
+# and Waydroid's icons, written with its launcher file up to a minute later:
+# an entry made at install time then gets the app's name and icon
+PathModified=%h/.local/share/waydroid/data/icons
+Unit=ztos-android-sync.service
+
+[Install]
+WantedBy=default.target
