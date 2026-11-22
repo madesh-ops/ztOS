@@ -2,6 +2,20 @@
 # What greetd starts: the ztMETRO session, the only one ztOS has. The log is
 # kept for one run back.
 [ -f /etc/ztos/session.env ] && . /etc/ztos/session.env
+
+# Apps that D-Bus or systemd start for the session (GNOME Maps, Calendar,
+# Weather and Clocks run as D-Bus services) are children of systemd --user,
+# not of ztmetro: give them the same graphics and malloc settings, or they
+# load the stock Mesa and GTK's text and icons come out faded and blurred.
+# A variable session.env left unset (the M20 Mesa's fallback) is unset there
+# too, so a bad start isn't carried into the next.
+sv=; uv=
+for v in LD_LIBRARY_PATH PAN_MESA_DEBUG GLIBC_TUNABLES; do
+	if eval "[ -n \"\${$v+x}\" ]"; then sv="$sv $v"; else uv="$uv $v"; fi
+done
+[ -n "$uv" ] && timeout 5 systemctl --user unset-environment $uv
+[ -n "$sv" ] && timeout 5 dbus-update-activation-environment --systemd $sv
+unset sv uv v
 state=${XDG_STATE_HOME:-$HOME/.local/state}
 mkdir -p "$state/ztos"
 log=$state/ztmetro.log
