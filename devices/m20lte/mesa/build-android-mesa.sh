@@ -25,7 +25,8 @@ here=$(cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$W" && cd "$W"
 
 pacman -S --needed --noconfirm meson ninja unzip patchelf python-mako python-yaml \
-	python-packaging glslang llvm clang libclc spirv-llvm-translator spirv-tools spirv-headers
+	python-packaging glslang llvm clang libclc spirv-llvm-translator spirv-tools spirv-headers \
+	libdrm zlib expat	# (the native tools' build; a bare Arch container lacks them)
 
 [ -d $NDK ] || { curl -fL -o ndk.zip https://dl.google.com/android/repository/$NDK-linux.zip; unzip -q ndk.zip; rm ndk.zip; }
 [ -f mesa-$VER.tar.xz ] || curl -fL -o mesa-$VER.tar.xz https://archive.mesa3d.org/mesa-$VER.tar.xz
