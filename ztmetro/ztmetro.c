@@ -8851,6 +8851,10 @@ static void waydroid_visible(const char *runtime_app_id) {
  * is asleep while none is (ztos-waydroid-power), so that a hidden app is
  * stopped and does not act as seen: a chat left open marks no messages read. */
 static uint32_t waydroid_woke_ms;
+/* The Android app whose window in front went last, and when: see the map */
+static char waydroid_front_gone_id[160];
+static char waydroid_front_gone_command[256];	/* (a launch_command) */
+static uint32_t waydroid_front_gone_ms;
 static bool waydroid_rewaking;	/* waiting for the app in front to come back (waydroid_rewake) */
 
 /* Publish policy before spawning: delayed children must apply the latest focus,
@@ -10252,6 +10256,17 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
     }
 	if (app_id && !strncmp(app_id, "waydroid.", 9) && !requested) {
 		const char *shown_id = server->shown ? server->shown->xdg_toplevel->app_id : NULL;
+		if (!server->shown && !server->locked && !strcmp(app_id, waydroid_front_gone_id) &&
+				now_ms() - waydroid_front_gone_ms < 1500) {
+			/* The app in front moved to a new window (Aurora Store after
+			 * its setup, an activity in a new task): Android drops one and
+			 * maps the other in the same breath. It stays in front. */
+			wlr_log(WLR_INFO, "Waydroid: '%s' came back in a new window", app_id);
+			snprintf(toplevel->launch_command, sizeof(toplevel->launch_command), "%s",
+				waydroid_front_gone_command);
+			show_toplevel(server, toplevel);
+			return;
+		}
 		if (!shown_id || strncmp(shown_id, "waydroid.", 9)) {
 			/* Android can reveal a background task after recents force-stop.
 			 * Keep it behind host Start; explicit launcher focus still works. */
@@ -10356,6 +10371,15 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	if (server->shown == toplevel && waydroid_full_ui_wait(server, toplevel)) {
 		damage(server);
 		return;
+	}
+	if (server->shown == toplevel && toplevel->xdg_toplevel->app_id &&
+			!strncmp(toplevel->xdg_toplevel->app_id, "waydroid.", 9)) {
+		/* (if the same app maps again at once, it goes back in front) */
+		snprintf(waydroid_front_gone_id, sizeof(waydroid_front_gone_id), "%s",
+			toplevel->xdg_toplevel->app_id);
+		snprintf(waydroid_front_gone_command, sizeof(waydroid_front_gone_command), "%s",
+			toplevel->launch_command);
+		waydroid_front_gone_ms = now_ms();
 	}
 	if (server->shown == toplevel) {
 		/* Closing an app lands on Start, as it does on the phone; one an

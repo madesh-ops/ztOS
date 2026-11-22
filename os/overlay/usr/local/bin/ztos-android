@@ -304,6 +304,31 @@ WAYDROID_SYSTEM = ('com.android.', 'com.google.android.', 'org.lineageos.', 'com
                    'org.microg.', 'com.qualcomm.', 'android.')
 
 
+def waydroid_launcher_apps():
+    """Package -> name of Android's apps with a launcher activity, from
+    `waydroid app list`; empty when the session is not up."""
+    try:
+        text = subprocess.run(['waydroid', 'app', 'list'], capture_output=True, text=True,
+                              timeout=15, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    apps, name, package, launcher = {}, '', '', False
+
+    def flush():
+        if package and launcher:
+            apps[package] = name or package
+    for line in text.splitlines():
+        if line.startswith('Name: '):
+            flush()
+            name, package, launcher = line[6:].strip(), '', False
+        elif line.startswith('packageName: '):
+            package = line[13:].strip()
+        elif line.strip() == 'android.intent.category.LAUNCHER':
+            launcher = True
+    flush()
+    return apps
+
+
 def sync_waydroid():
     applications = Path(os.environ.get('XDG_DATA_HOME', str(Path.home()/'.local/share')))/'applications'
     found = {}
@@ -320,6 +345,17 @@ def sync_waydroid():
             elif line.startswith('Icon='):
                 icon = line[5:].strip() or icon
         found[package] = (name, icon)
+    # Android's own list as well: Waydroid writes the launcher file from a
+    # package callback that does not always come (Instagram installed by
+    # Aurora Store inside Android, 2026-11-22: no file, so no tile). Only
+    # while the session answers; an app found only here keeps a generic icon
+    # until Waydroid writes its file.
+    icons = Path.home()/'.local/share/waydroid/data/icons'
+    listed = waydroid_launcher_apps()
+    for package, name in listed.items():
+        if package not in found and not package.startswith(WAYDROID_SYSTEM):
+            icon = icons/(package+'.png')
+            found[package] = (name, str(icon) if icon.exists() else 'applications-other')
     if not found and not any(applications.glob('waydroid.*.desktop')):
         return []	# Waydroid has not written its files (yet): change nothing
     registry = installed()
@@ -327,10 +363,14 @@ def sync_waydroid():
     for package, (name, icon) in found.items():
         if registry_key(package, 'waydroid') not in registry:
             registry[registry_key(package, 'waydroid')] = {
-                'package': package, 'name': name, 'runtime': 'waydroid', 'icon': icon, 'synced': True}
+                'package': package, 'name': name, 'runtime': 'waydroid', 'icon': icon, 'synced': True,
+                'listed': package in listed and not (applications/('waydroid.'+package+'.desktop')).exists()}
             changed.append('+'+package)
     for key, metadata in list(registry.items()):
-        if metadata.get('synced') and metadata.get('runtime') == 'waydroid' and metadata['package'] not in found:
+        # An app known only from Android's list goes only when that list
+        # answered without it: not while Android is down.
+        if metadata.get('synced') and metadata.get('runtime') == 'waydroid' and \
+                metadata['package'] not in found and (listed or not metadata.get('listed')):
             del registry[key]
             (applications/('ztos-android-'+metadata['package']+'-waydroid.desktop')).unlink(missing_ok=True)
             changed.append('-'+metadata['package'])
