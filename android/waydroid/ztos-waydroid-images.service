@@ -3,7 +3,9 @@ Description=ztOS: put the stripped Android (Waydroid) in place
 Documentation=file:///usr/share/ztos-waydroid/README.md
 Wants=network-online.target
 After=network-online.target
-ConditionPathExists=!/var/lib/ztos/waydroid-ready
+# (no ConditionPathExists on the ready mark: the script itself returns at
+# once when Android is ready AND installed, and finishes an install.sh that
+# a first boot left undone, as on the M20)
 
 [Service]
 Type=oneshot

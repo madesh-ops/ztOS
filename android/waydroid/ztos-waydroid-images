@@ -40,6 +40,8 @@ CACHE = pathlib.Path('/var/cache/ztos-waydroid')
 READY = pathlib.Path('/var/lib/ztos/waydroid-ready')
 RECIPE = pathlib.Path('/usr/share/ztos-waydroid')      # android/waydroid, installed
 MANIFEST = pathlib.Path('/vendor/ztos/manifest.toml')
+LAUNCHER = pathlib.Path('/usr/local/bin/ztos-waydroid-launch')        # install.sh
+BOOT_HELPER = pathlib.Path('/usr/local/libexec/ztos-waydroid-boot')   # install.sh
 
 
 def say(text):
@@ -97,8 +99,13 @@ def unpack(kind, archive):
     (IMAGES / (name + '.part')).replace(IMAGES / name)
 
 
+def installed():
+    """install.sh got to its end: its launcher and boot helper are in place."""
+    return LAUNCHER.exists() and BOOT_HELPER.exists()
+
+
 def main():
-    if READY.exists():
+    if READY.exists() and installed():
         return 0
     if not binder_allowed():
         say('no binder in this kernel: Waydroid stays off, ATL runs Android apps')
@@ -106,6 +113,14 @@ def main():
     if (IMAGES / 'system.img').exists() and (IMAGES / 'vendor.img').exists() and \
             pathlib.Path('/var/lib/waydroid/waydroid.cfg').exists():
         say('images already in place: kept as they are')
+        # A first boot whose install.sh failed (the M20 on 2026-11-13: a
+        # script missing from the recipe) left the images and waydroid.cfg
+        # but no launcher, services or vendor fixes; Android then never
+        # started from ztMETRO. Finish it now. --strip rebuilds system.img
+        # from system.img.stock, so running it again is safe.
+        if not installed():
+            say('install.sh never finished: stripping and patching now')
+            subprocess.run([str(RECIPE / 'install.sh'), '--strip'], check=True)
     else:
         for kind in ('system', 'vendor'):
             unpack(kind, fetch(kind))

@@ -59,7 +59,7 @@ install -m755 "$W/launch.sh" /usr/local/bin/ztos-waydroid-launch
 install -m755 "$W/power.sh" /usr/local/bin/ztos-waydroid-power
 install -m755 "$W/ztos-waydroid-boot" /usr/local/libexec/ztos-waydroid-boot
 install -d /usr/share/ztos-waydroid
-for f in install.sh strip-image.sh patch-vendor.sh patch-composer.py waydroid.cfg network.py recover.sh \
+for f in install.sh strip-image.sh patch-init-wake-alarm.py patch-vendor.sh patch-composer.py waydroid.cfg network.py recover.sh \
 		audio-recover.py launch.sh power.sh ztos-waydroid-boot README.md ztos-waydroid-network.service \
 		ztos-waydroid-session.service ztos-waydroid-boot.service ztos-waydroid-audio-reconnect.service; do
 	[ -e "$W/$f" ] && cp -a "$W/$f" /usr/share/ztos-waydroid/
