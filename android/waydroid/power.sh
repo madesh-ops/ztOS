@@ -39,6 +39,16 @@ push_hold_active() {
 	rm -f "$hold"
 	return 1
 }
+# Android busy with work the user started (recover busy: a download, an
+# install): not frozen now, asked again in a minute, frozen once it is done.
+android_busy() {
+	local what
+	what=$(sudo -n /usr/local/libexec/ztos-waydroid-recover busy 2>/dev/null) || return 1
+	echo "ztos-waydroid-power: not freezing Android, busy: $(tr '\n' ' ' <<< "$what")" >&2
+	systemd-run --user --quiet --collect --unit=ztos-waydroid-power-recheck \
+		--on-active=60 /usr/local/bin/ztos-waydroid-power sync 2>/dev/null || true
+	return 0
+}
 runtime=${XDG_RUNTIME_DIR:-$ZTOS_RUNTIME_DIR}
 policy="$runtime/ztos-waydroid-power-state"
 case ${1:-} in
@@ -67,12 +77,12 @@ for ((pass=0; pass<3; pass++)); do
             launch_in_progress && exit 0
             sudo -n /usr/local/libexec/ztos-waydroid-recover display off
             push_hold_active && exit 0
-            if ! keep_awake_active; then sudo -n /usr/local/libexec/ztos-waydroid-recover freeze; fi
+            if ! keep_awake_active && ! android_busy; then sudo -n /usr/local/libexec/ztos-waydroid-recover freeze; fi
             ;;
         screen-off)
             sudo -n /usr/local/libexec/ztos-waydroid-recover display off
             push_hold_active && exit 0
-            if ! keep_awake_active; then sudo -n /usr/local/libexec/ztos-waydroid-recover freeze; fi
+            if ! keep_awake_active && ! android_busy; then sudo -n /usr/local/libexec/ztos-waydroid-recover freeze; fi
             ;;
         *) exit 2 ;;
     esac

@@ -329,12 +329,28 @@ def waydroid_launcher_apps():
     return apps
 
 
+def waydroid_user_apps():
+    """The packages the user installed in Android (pm list packages -3), or
+    None when Android cannot say (not running, no sudo rule yet)."""
+    try:
+        result = subprocess.run(['sudo', '-n', '/usr/local/libexec/ztos-waydroid-recover', 'user-apps'],
+                                capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return set(result.stdout.split()) if result.returncode == 0 else None
+
+
 def sync_waydroid():
     applications = Path(os.environ.get('XDG_DATA_HOME', str(Path.home()/'.local/share')))/'applications'
     found = {}
+    user_apps = waydroid_user_apps()
+
+    def system(package):
+        # Android's own word when it answers; the image's names otherwise
+        return package not in user_apps if user_apps is not None else package.startswith(WAYDROID_SYSTEM)
     for desktop in applications.glob('waydroid.*.desktop'):
         package = desktop.name[len('waydroid.'):-len('.desktop')]
-        if package.startswith(WAYDROID_SYSTEM):
+        if system(package):
             continue
         name, icon = package, 'applications-other'
         for line in desktop.read_text(errors='replace').splitlines():
@@ -353,7 +369,7 @@ def sync_waydroid():
     icons = Path.home()/'.local/share/waydroid/data/icons'
     listed = waydroid_launcher_apps()
     for package, name in listed.items():
-        if package not in found and not package.startswith(WAYDROID_SYSTEM):
+        if package not in found and not system(package):
             icon = icons/(package+'.png')
             found[package] = (name, str(icon) if icon.exists() else 'applications-other')
     if listed:

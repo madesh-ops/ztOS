@@ -138,6 +138,36 @@ case $1 in
         ztos_as_user WAYLAND_DISPLAY=wayland-0 \
             timeout 60 waydroid app remove "$2"
         ;;
+    # Android is at work the user asked for and would not want stopped by a
+    # freeze: an app's foreground service (an app store's download, Aurora
+    # Store's "Downloads" notification; music; navigation). Not an open
+    # install session: one waits on the user's confirmation, and one an
+    # installer never committed stays for days. Exit 0 and say what, when it is; 1 when it
+    # is not (or Android cannot answer: frozen, not up). Android's own
+    # system services are not counted. ztos-waydroid-power asks before every
+    # freeze: Instagram's 281 MB download stopped each time the screen went
+    # off, and its install was abandoned (2026-11-22).
+    # The apps installed by the user (not the image's): ztos-android sync's
+    # list of what gets an entry. By name it took com.google.android.* for
+    # system apps, and Google Maps or Calculator from Aurora Store got none.
+    user-apps)
+        [[ $# == 1 ]] || exit 2
+        [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == RUNNING ]] || exit 1
+        android_sh 'pm list packages -3' | sed -n 's/^package://p'
+        ;;
+    busy)
+        [[ $# == 1 ]] || exit 2
+        [[ $(lxc-info "${lxc_args[@]}" -sH 2>/dev/null) == RUNNING ]] || exit 1
+        what=$(android_sh '
+            [ "$(getprop sys.boot_completed)" = 1 ] || exit 0
+            dumpsys activity services | awk "
+                /\\* ServiceRecord\\{/ { n = split(\$0, a, \" \"); pkg = a[n]; sub(/\\/.*/, \"\", pkg) }
+                /isForeground=true/ { print \"foreground \" pkg }" |
+                grep -vE "^foreground (android\$|com\\.android\\.|android\\.ext\\.|com\\.google\\.android\\.ext\\.)" | sort -u
+        ' 2>/dev/null) || exit 1
+        [[ -n $what ]] || exit 1
+        printf '%s\n' "$what"
+        ;;
     close)
         [[ $# == 2 && $2 =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]] || exit 2
         # An app quit from the switcher after going back to Start finds
