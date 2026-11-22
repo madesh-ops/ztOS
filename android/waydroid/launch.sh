@@ -5,20 +5,31 @@ PS4='+ ${SECONDS}s '
 set -x
 install_apk=
 remove_package=
-if [[ ${1:-} == --install && $# == 2 && -f $2 ]]; then
+full_ui=
+if [[ ${1:-} == --full-ui && $# == 1 ]]; then
+    # Waydroid's own full screen (the app list's "Waydroid"), through the same
+    # recovery as an app: plain `waydroid` hung on "Loading..." when the
+    # session was stale (ztMETRO restarted) or when it had started the session
+    # itself, in its own never-ending process, which ztMETRO then waited on.
+    full_ui=1
+    package=Waydroid
+elif [[ ${1:-} == --install && $# == 2 && -f $2 ]]; then
     install_apk=$(realpath -- "$2")
 elif [[ ${1:-} == --remove && $# == 2 && $2 =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]]; then
     remove_package=$2
 elif [[ $# == 1 && $1 =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]]; then
     package=$1
 else
-    echo 'Usage: ztos-waydroid-launch PACKAGE | --install APK' >&2; exit 2
+    echo 'Usage: ztos-waydroid-launch PACKAGE | --full-ui | --install APK | --remove PACKAGE' >&2; exit 2
 fi
+# the window ztMETRO shows it in: "waydroid.PACKAGE", or "Waydroid"
+window_id=waydroid.$package
+[[ -z $full_ui ]] || window_id=Waydroid
 if [[ -n $install_apk ]]; then
     package=$(ztos-android inspect "$install_apk" | cut -f1)
 fi
 [[ -z $remove_package ]] || package=$remove_package
-[[ $package =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]] || {
+[[ -n $full_ui || $package =~ ^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$ ]] || {
     echo 'APK has no valid package name.' >&2; exit 2;
 }
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
@@ -61,7 +72,7 @@ for attempt in 1 2; do
         sleep 1
     done
     if "$responsive" && sudo -n /usr/local/libexec/ztos-waydroid-recover ready &&
-       { if [[ -n $install_apk ]]; then sudo -n /usr/local/libexec/ztos-waydroid-recover install "$install_apk"; elif [[ -n $remove_package ]]; then sudo -n /usr/local/libexec/ztos-waydroid-recover remove "$remove_package"; else timeout 20 waydroid app launch "$package"; fi; }; then
+       { if [[ -n $install_apk ]]; then sudo -n /usr/local/libexec/ztos-waydroid-recover install "$install_apk"; elif [[ -n $remove_package ]]; then sudo -n /usr/local/libexec/ztos-waydroid-recover remove "$remove_package"; elif [[ -n $full_ui ]]; then timeout 20 waydroid show-full-ui; else timeout 20 waydroid app launch "$package"; fi; }; then
         printf '%s\n' "$compositor_generation" > "$session_generation"
         if [[ -n $install_apk || -n $remove_package ]]; then
             for ((i=0; i<3; i++)); do
@@ -77,8 +88,8 @@ for attempt in 1 2; do
             # Keep the launch marker until ztMETRO has shown this package.
             for ((i=0; i<20; i++)); do
                 if [[ -p $XDG_RUNTIME_DIR/ztmetro.ctl ]]; then
-                    timeout 1 bash -c 'printf "focus waydroid.%s\n" "$1" > "$2"' _ \
-                        "$package" "$XDG_RUNTIME_DIR/ztmetro.ctl" || true
+                    timeout 1 bash -c 'printf "focus %s\n" "$1" > "$2"' _ \
+                        "$window_id" "$XDG_RUNTIME_DIR/ztmetro.ctl" || true
                     if [[ -r $XDG_RUNTIME_DIR/ztos-waydroid-visible ]] &&
                        [[ $(cat "$XDG_RUNTIME_DIR/ztos-waydroid-visible") == "$package" ]]; then
                         exit 0

@@ -8839,7 +8839,11 @@ static void waydroid_visible(const char *runtime_app_id) {
 		char path[512];
 		snprintf(path, sizeof(path), "%s/ztos-waydroid-visible", runtime);
 		FILE *ack = fopen(path, "w");
-		if (ack) { fprintf(ack, "%s\n", runtime_app_id + 9); fclose(ack); }
+		/* the package, or "Waydroid" for its full screen (launch.sh --full-ui) */
+		if (ack) {
+			fprintf(ack, "%s\n", strcmp(runtime_app_id, "Waydroid") ? runtime_app_id + 9 : runtime_app_id);
+			fclose(ack);
+		}
 	}
 }
 
@@ -8888,8 +8892,7 @@ static void show_toplevel(struct zt_server *server, struct zt_toplevel *toplevel
 		 * the screen off (screen_set and unlocking wake Android then) */
 		waydroid_power_request(!server->screen_on ? "screen-off" : server->locked ? "idle" : "active");
 		run_detached("ztos-waydroid-power", "sync", NULL, NULL);
-		if (runtime_app_id[8] == '.')
-			waydroid_visible(runtime_app_id);
+		waydroid_visible(runtime_app_id);
 	} else {
 		waydroid_power_request(demoloop ? "active" : "idle");
 		run_detached("ztos-waydroid-power", "sync", NULL, NULL);
@@ -9024,7 +9027,19 @@ static void close_inherited(void) {
 	close_range(3, ~0U, 0);
 }
 
+/* Waydroid's full screen: what its desktop entry runs ("waydroid") goes
+ * through ztos-waydroid-launch, as an Android app does. Plain `waydroid`
+ * starts Android in its own process when it is not running, and that
+ * process never ends: we waited on it, behind "Loading...", at every later
+ * tap. After a shell restart it also asked a session still bound to the
+ * old Wayland socket, and no window came. */
+#define WAYDROID_FULL_UI "ztos-waydroid-launch --full-ui"
+
 static void launch(struct zt_server *server, const char *command) {
+	if (!strcmp(command, "waydroid") || !strcmp(command, "waydroid first-launch") ||
+			!strcmp(command, "waydroid show-full-ui")) {
+		command = WAYDROID_FULL_UI;
+	}
     struct zt_toplevel *existing;
     wl_list_for_each(existing, &server->toplevels, link) {
         if (existing->mapped && !existing->waydroid_boot && existing->launch_command[0] &&
@@ -9081,7 +9096,7 @@ static void launch(struct zt_server *server, const char *command) {
 	}
 	/* Waydroid's full UI only gets a window while Android's display is on, and
 	 * no window is in front yet to ask for that (ztos-android does it for apps) */
-	if (!strcmp(command, "waydroid")) {
+	if (!strcmp(command, WAYDROID_FULL_UI)) {
 		waydroid_power_request("active");
 		run_detached("ztos-waydroid-power", "sync", NULL, NULL);
 	}
@@ -10181,12 +10196,18 @@ static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 		toplevel->android_runtime = name && strcmp(name + 1, "android-translation-layer") == 0;
 	}
 	const char *app_id = toplevel->xdg_toplevel->app_id;
+	if (app_id && (!strncmp(app_id, "waydroid.", 9) || !strcmp(app_id, "Waydroid"))) {
+		wlr_log(WLR_INFO, "map: Android window '%s' (waiting for '%s')", app_id,
+			toplevel->server->pending_command);
+	}
 	if (app_id && !strncmp(app_id, "waydroid.", 9)) {
 		toplevel->android_runtime = true;
 	}
     struct zt_server *server = toplevel->server;
 	if (app_id && !strcmp(app_id, "Waydroid") &&
-			!strncmp(server->pending_command, "ztos-android launch ", 20)) {
+			(!strncmp(server->pending_command, "ztos-android launch ", 20) ||
+			 (!strncmp(server->pending_command, "ztos-waydroid-launch ", 21) &&
+			  strcmp(server->pending_command, WAYDROID_FULL_UI)))) {
 		/* The boot surface maps before the requested package. It must not
 		 * consume pending_command or cancel the launch/loading timer. */
 		toplevel->waydroid_boot = true;
@@ -10272,6 +10293,38 @@ static bool waydroid_rewake(struct zt_server *server, struct zt_toplevel *toplev
 	return true;
 }
 
+/* Waydroid's full screen went while ztos-waydroid-launch --full-ui is still
+ * at work: that was Android's boot surface (it maps and goes at once while a
+ * new session starts), and the full screen comes once Android is up, 20-40 s
+ * later. Keep "Loading..." up for it, waiting on the launcher, rather than
+ * leave for Start as if it had failed. */
+static bool waydroid_full_ui_wait(struct zt_server *server, struct zt_toplevel *toplevel) {
+	const char *runtime = getenv("XDG_RUNTIME_DIR");
+	if (!runtime || strcmp(toplevel->launch_command, WAYDROID_FULL_UI) || server->locked) return false;
+	char path[512];
+	snprintf(path, sizeof(path), "%s/ztos-waydroid-launching", runtime);
+	FILE *marker = fopen(path, "r");
+	int pid = 0;
+	if (marker) {
+		if (fscanf(marker, "%d", &pid) != 1) pid = 0;
+		fclose(marker);
+	}
+	if (pid <= 0 || kill(pid, 0) != 0) return false;
+	wlr_log(WLR_INFO, "Waydroid: its boot surface went; waiting for the full screen (launcher %d)", pid);
+	snprintf(server->pending_command, sizeof(server->pending_command), "%s", WAYDROID_FULL_UI);
+	server->pending_pid = pid;	/* launch_timed_out waits while it lives */
+	server->android_compiling = false;
+	server->launch_ms = server->loading_since = now_ms();
+	prepare_loading(server);
+	server->shown = NULL;
+	server->leaving = NULL;
+	wlr_seat_keyboard_notify_clear_focus(server->seat);
+	text_inputs_focus(server, NULL);
+	osk_show(server, false);
+	wl_event_source_timer_update(server->launch_timer, LAUNCH_WAIT_MS);
+	return true;
+}
+
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
 	struct zt_server *server = toplevel->server;
@@ -10281,6 +10334,10 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		draw_status(server);
 	}
 	toplevel->mapped = false;
+	if (waydroid_window(toplevel->xdg_toplevel->app_id)) {
+		wlr_log(WLR_INFO, "unmap: Android window '%s'%s", toplevel->xdg_toplevel->app_id,
+			server->shown == toplevel ? " (in front)" : "");
+	}
 	if (toplevel->waydroid_ime) {
 		if (server->shown && server->shown->xdg_toplevel->app_id &&
 				!strncmp(server->shown->xdg_toplevel->app_id, "waydroid.", 9)) {
@@ -10293,6 +10350,10 @@ static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 		server->leaving = NULL;
 	}
 	if (server->shown == toplevel && waydroid_rewake(server, toplevel)) {
+		damage(server);
+		return;
+	}
+	if (server->shown == toplevel && waydroid_full_ui_wait(server, toplevel)) {
 		damage(server);
 		return;
 	}
@@ -13593,7 +13654,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 			if (t->mapped && id && !strcmp(id, line + 6)) {
 				if (!server->locked) {
 					if (t != server->shown) show_toplevel(server, t);
-					if (!strncmp(id, "waydroid.", 9)) waydroid_visible(id);
+					if (waydroid_window(id)) waydroid_visible(id);
 				}
 				break;
 			}
@@ -13956,6 +14017,12 @@ static void ctl_command(struct zt_server *server, char *line) {
 			server->osk_visible, server->osk_symbols ? "(symbols)" : "",
 			app_height(server), server->scroll, server->page, server->list_scroll,
 			server->n_items, server->editing, server->edit, server->menu_open, server->n_tiles);
+		/* every window, mapped or not: which app, what started it */
+		wl_list_for_each(tl, &server->toplevels, link) {
+			wlr_log(WLR_INFO, "state: window '%s' mapped=%d hidden=%d command='%s'",
+				tl->xdg_toplevel && tl->xdg_toplevel->app_id ? tl->xdg_toplevel->app_id : "",
+				tl->mapped, tl->background_hidden, tl->launch_command);
+		}
 	}
 }
 
