@@ -1,0 +1,52 @@
+name: Android Mesa (M20)
+
+# Android's Mesa for Waydroid on the Galaxy M20, with the G71 fix
+# (devices/m20lte/mesa/build-android-mesa.sh): built here because it needs an
+# x86-64 Arch Linux with the Android NDK. The artifact's lib64/ goes to the
+# phone's /vendor/ztos/android-vendor/lib64/, then
+# /usr/share/ztos-waydroid/install.sh --config-only lays it over the vendor image.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [m20lte-port]
+    paths:
+      - devices/m20lte/mesa/build-android-mesa.sh
+      - devices/m20lte/mesa/pan-bi-g71-derivatives.diff
+      - .github/workflows/android-mesa-m20.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-mesa-m20
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    timeout-minutes: 120
+    steps:
+      - name: Base system
+        run: pacman -Syu --noconfirm --needed base-devel git curl
+      - uses: actions/checkout@v4
+      - name: Cache the NDK and the Mesa tarball
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/amesa/android-ndk-r27c
+            /root/amesa/mesa-*.tar.xz
+          key: android-mesa-m20-ndk-r27c-mesa-26.2.5
+      - name: Build
+        run: bash devices/m20lte/mesa/build-android-mesa.sh /root/amesa
+      - name: Package
+        run: |
+          cd /root/amesa/out
+          sha256sum lib64/*.so lib64/egl/*.so | tee SHA256SUMS
+          tar -czf "$GITHUB_WORKSPACE/android-mesa-m20.tar.gz" lib64 SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-mesa-m20
+          path: android-mesa-m20.tar.gz
+          retention-days: 30
