@@ -772,7 +772,18 @@ def main():
     elif args.command == 'close':
         metadata = installed().get(registry_key(args.package, 'waydroid'))
         if metadata:
-            subprocess.run(['sudo', '-n', '/usr/local/libexec/ztos-waydroid-recover', 'close', args.package], check=True)
+            # Run by the shell when an app is swiped away: nobody is waiting,
+            # so a failure goes to the log, never to the screen as "Unable to
+            # open application" (which every failed command used to post).
+            result = subprocess.run(['sudo', '-n', '/usr/local/libexec/ztos-waydroid-recover', 'close', args.package],
+                                    capture_output=True, text=True)
+            if result.returncode:
+                logs = Path(os.environ.get('XDG_STATE_HOME', str(Path.home()/'.local/state')))
+                logs.mkdir(parents=True, exist_ok=True)
+                with open(logs/'ztos-android.log', 'a') as log:
+                    detail = ' / '.join((result.stdout+result.stderr).split(chr(10))).strip()
+                    log.write('%s close %s: exit %d %s%s' % (time.strftime('%F %T'), args.package,
+                              result.returncode, detail, chr(10)))
     elif args.command == 'doctor':
         binary = shutil.which('android-translation-layer')
         if not binary: raise ValueError('android-translation-layer is not installed.')

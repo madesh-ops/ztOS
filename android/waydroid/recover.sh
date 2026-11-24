@@ -196,7 +196,10 @@ case $1 in
                 sleep 0.15
             done
             sleep 1
-            timeout 5 lxc-freeze "${lxc_args[@]}"
+            # Not fatal: the app is stopped either way, and the idle policy
+            # freezes Android again on its own.
+            timeout 5 lxc-freeze "${lxc_args[@]}" ||
+                logger -t ztos-waydroid-recover "close $2: freezing again failed ($?); left to the idle policy"
         fi
         ;;
     recover)
