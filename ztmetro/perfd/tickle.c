@@ -310,8 +310,59 @@ static struct app *app_holding(pid_t pid) {
 	return NULL;
 }
 
+/* A stream made with PipeWire's own API (mpv's ao=pipewire: Tube, Celluloid)
+ * carries only its node's properties in pactl's list: who made it is on its
+ * client. Without this the playing app was paused like any other in the
+ * background, let run 50 ms a second, and its sound came in bursts. The
+ * clients are read once per scan, only when a stream needs them. */
+static char clients_json[65536];
+static bool clients_read;
+
+static pid_t client_pid(const char *stream) {
+	const char *key = strstr(stream, "\"client\":\"");
+	if (!key) {
+		return 0;
+	}
+	int client = atoi(key + 10);
+	if (!clients_read) {
+		clients_read = true;
+		clients_json[0] = 0;
+		char *argv[] = { "pactl", "-f", "json", "list", "clients", NULL };
+		int fd;
+		pid_t child = pactl(argv, &fd);
+		if (child < 0) {
+			return 0;
+		}
+		size_t len = 0;
+		ssize_t n;
+		while (len < sizeof(clients_json) - 1 &&
+				(n = read(fd, clients_json + len, sizeof(clients_json) - 1 - len)) > 0) {
+			len += n;
+		}
+		clients_json[len] = 0;
+		close(fd);
+		waitpid(child, NULL, 0);
+	}
+	char want[32];
+	snprintf(want, sizeof(want), "\"index\":%d,", client);
+	char *obj = strstr(clients_json, want);
+	if (!obj) {
+		return 0;
+	}
+	char *end = strstr(obj + strlen(want), "\"index\":");
+	static const char *const keys[] = { "\"application.process.id\":\"", "\"pipewire.sec.pid\":\"" };
+	for (int i = 0; i < 2; i++) {
+		char *v = strstr(obj, keys[i]);
+		if (v && (!end || v < end)) {
+			return atoi(v + strlen(keys[i]));
+		}
+	}
+	return 0;
+}
+
 /* Which apps have a stream that is playing (or recording) now. */
 static void audio_scan(void) {
+	clients_read = false;
     if (waydroid.audio) {
         waydroid.audio = false;
         waydroid.audio_until = now_ms() + AUDIO_HOLD_MS;
@@ -355,8 +406,12 @@ static void audio_scan(void) {
 				waydroid.audio = true;
 				waydroid.audio_until = 0;
 			}
-			if (strstr(obj, "\"corked\":false") && pidkey) {
-				struct app *a = app_holding(atoi(pidkey + 26));
+			pid_t player = pidkey ? atoi(pidkey + 26) : 0;
+			if (strstr(obj, "\"corked\":false") && !player) {
+				player = client_pid(obj);
+			}
+			if (strstr(obj, "\"corked\":false") && player > 0) {
+				struct app *a = app_holding(player);
 				if (a) {
 					a->audio = true;
 					a->audio_until = 0;
