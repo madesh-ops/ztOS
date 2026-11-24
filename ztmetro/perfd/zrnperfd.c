@@ -685,6 +685,7 @@ static void led_white(bool on) {
 
 static long little_floor, little_ceiling;	/* policy0's lowest step and current max */
 static long little_rest_min;	/* policy0's floor without the touch boost (apply: the lift's, or the lowest step) */
+static long gpu_floor, gpu_ceiling;		/* the GPU's limits as the rung set them (Hz); 0: not yet */
 static long touch_until;			/* touch boost on until then; 0: off */
 /* The motion hold (the shell's "motion MS"): the efficiency cores and the GPU
  * each held at one clock while the shell animates, the clocks it holds (0:
@@ -1418,6 +1419,9 @@ static void apply(void) {
 			little_ceiling = max;
 			little_rest_min = min > max ? max : min;
 			if (touch_until && TOUCH_BOOST_KHZ > min) min = TOUCH_BOOST_KHZ;
+			if (hold_little > max) {
+				max = hold_little;	/* a motion hold on: kept through the change */
+			}
 		}
 		if (min > max) min = max;
 		snprintf(path, sizeof(path), CPUFREQ "/policy%d/scaling_governor", clusters[c]);
@@ -1466,6 +1470,14 @@ static void apply(void) {
 		long floor = screen_on ? (rest < max ? rest : max) : table[0];
 		if (lifted && capped(table, n, LIFT_GPU_SHARE) > floor)
 			floor = capped(table, n, LIFT_GPU_SHARE) < max ? capped(table, n, LIFT_GPU_SHARE) : max;
+		if (profile == PERFORMANCE && !idle0) {
+			floor = top;
+		}
+		gpu_floor = floor;
+		gpu_ceiling = max;
+		if (hold_gpu) {
+			max = floor = hold_gpu;	/* a motion hold on: kept through the change */
+		}
 		/* lower the floor before the ceiling, and raise them the other way */
 		put_long(perfial_gpu_file("min_freq"), table[0]);
 		put_long(perfial_gpu_file("max_freq"), max);

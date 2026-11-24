@@ -86,6 +86,10 @@ enum page {
 	PAGE_NAVIGATION,
 	PAGE_BOOST,	/* Dynamic Boost System: RapidBoost and IntelligentBoost */
 	PAGE_VIDEOS,	/* the lock screen's video: the phone's videos, one added to ~/Videos */
+	PAGE_POWER,	/* Power Management: the category over Performance, Boost, Battery + sleep */
+	PAGE_PASSCODE,	/* the lock screen's passcode (zrn-passcoded): passcodepage.h */
+	PAGE_PASSCODE_ENTRY,	/* typing one: new, confirm, current */
+	PAGE_PASSCODE_KEY,	/* the recovery key, shown once */
 };
 
 enum action {
@@ -3361,6 +3365,18 @@ struct about_info {
 	char shell[128], shell_detail[128];
 };
 
+/* a whole small file as one string: trailing newlines and NULs (the device
+ * tree's strings end in one) dropped */
+static bool about_file(const char *path, char *out, size_t size) {
+	out[0] = 0;
+	FILE *f = fopen(path, "r");
+	if (!f) return false;
+	size_t n = fread(out, 1, size - 1, f);
+	fclose(f);
+	out[n] = 0;
+	while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\0' || out[n - 1] == ' ')) out[--n] = 0;
+	return n > 0;
+}
 
 /* KEY=value from an os-release style file, its quotes taken off */
 static bool about_key(const char *path, const char *key, char *out, size_t size) {
@@ -3692,6 +3708,9 @@ static double render_page_content(cairo_t *cr, int p) {
 	case PAGE_WIFI_JOIN: return draw_wifi_join(cr);
 	case PAGE_WIFI_NET: return draw_wifi_net(cr);
 	case PAGE_VIDEOS: return draw_videos(cr);
+	case PAGE_PASSCODE: return draw_passcode(cr);
+	case PAGE_PASSCODE_ENTRY: return draw_passcode_entry(cr);
+	case PAGE_PASSCODE_KEY: return draw_passcode_key(cr);
 	}
 	return 0;
 }
