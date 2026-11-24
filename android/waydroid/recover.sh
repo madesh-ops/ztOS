@@ -277,6 +277,11 @@ case $1 in
                timeout 3 lxc-attach "${lxc_args[@]}" -- /system/bin/service check waydroidplatform 2>/dev/null | grep -q ': found$'; then
                 settings
                 /usr/local/libexec/ztos-waydroid-audio
+                # The word the shell reads: Android is up. Written here, as
+                # root, because the user's start job cannot write in /run
+                # (upstream 3bd0b9f; ztMETRO launches nothing in Android until
+                # it is there).
+                install -m644 /dev/null /run/ztos-waydroid-boot-ready
                 exit 0
             fi
             sleep 0.5

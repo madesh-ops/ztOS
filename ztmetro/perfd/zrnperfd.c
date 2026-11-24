@@ -1822,6 +1822,13 @@ static int uevents(void) {
 
 int main(void) {
 	perfial_load();		/* the phone's topology, if ztos-iald has written it */
+	/* the motion hold's clocks, where a phone's GPU needs other than the
+	 * S9's (ZRNPERFD_MOTION_GPU_HZ, ZRNPERFD_MOTION_KHZ; its zrnperfd.service
+	 * drop-in sets them). The M20's Mali-G71 MP2 held at 450 MHz took 7-19 ms
+	 * a frame and an animation missed every other vblank; at 845 MHz, 1-5 ms */
+	const char *mhz = getenv("ZRNPERFD_MOTION_GPU_HZ"), *mkhz = getenv("ZRNPERFD_MOTION_KHZ");
+	if (mhz && atol(mhz) > 0) motion_hz = atol(mhz);
+	if (mkhz && atol(mkhz) > 0) motion_khz = atol(mkhz);
 	char line[160];
 	setvbuf(stderr, NULL, _IOLBF, 0);
 	signal(SIGTERM, stop);
