@@ -2359,6 +2359,11 @@ static int exynos7885_abox_register_mclk(struct exynos7885_abox_rproc *abox)
 					   &abox->mclk_hw);
 }
 
+static void exynos7885_abox_unprepare_clk(void *clk)
+{
+	clk_unprepare(clk);
+}
+
 static int exynos7885_abox_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -2485,6 +2490,23 @@ static int exynos7885_abox_probe(struct platform_device *pdev)
 	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(abox->clocks), abox->clocks);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to get ABOX clocks\n");
+	/*
+	 * The ABOX bus clock is also the System MMU's "master" clock: the
+	 * SysMMU's runtime suspend (from a PM worker, after unprepare() has
+	 * let ABOX go) clk_enable()s it around its register writes. Unprepared,
+	 * that enable fails ("Enabling unprepared gout_abox_aclk"), the SysMMU
+	 * writes anyway with the bus clock off, and the CPU hangs on the bus
+	 * (a hard lockup a few seconds after a sound ends). Kept prepared, not
+	 * enabled, for as long as this driver is bound; the prepare_enable /
+	 * disable_unprepare pairs around a run nest on top of it.
+	 */
+	ret = clk_prepare(abox->clocks[ABOX_CLK_ACLK].clk);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to prepare the ABOX bus clock\n");
+	ret = devm_add_action_or_reset(dev, exynos7885_abox_unprepare_clk,
+				       abox->clocks[ABOX_CLK_ACLK].clk);
+	if (ret)
+		return ret;
 	abox->uaif[3] = (struct exynos7885_abox_uaif) {
 		.div = abox->clocks[ABOX_CLK_UAIF3_DIV].clk,
 		.mux = abox->clocks[ABOX_CLK_UAIF3_MUX].clk,
