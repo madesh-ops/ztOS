@@ -1,0 +1,17 @@
+[Unit]
+Description=ztOS: a clean shutdown is not a Mesa freeze (clears the session's pending Mesa mark)
+# /etc/ztos/session.env counts a restart within 90 s of a session start as a
+# freeze of the patched Mesa, and after two in a row falls back to Arch's.
+# A power-off or reboot through systemd is not a freeze: this unit is stopped
+# then (before the file systems go), and stopping it drops the marks. A real
+# freeze, a panic or a held Power key never stops it, so those still count.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/bin/sh -c 'rm -f /home/*/.local/state/ztos/mesa-m20.pending'
+
+[Install]
+WantedBy=multi-user.target

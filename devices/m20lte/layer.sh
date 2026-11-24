@@ -62,4 +62,4 @@ ch systemctl --global mask at-spi-dbus-bus.service xdg-document-portal.service \
 # systemd-networkd runs the USB link's DHCP server (10-zboot-usb.network;
 # NetworkManager leaves usb0 alone), so the computer gets 172.16.42.2
 DEVICE_UNITS="zboot-usb-gadget zboot-firstboot zboot-hold systemd-networkd zrn-zram earlyoom
-	ztos-m20-mesa ztos-m20-firmware"
+	ztos-m20-mesa ztos-m20-mesa-guard ztos-m20-firmware"
