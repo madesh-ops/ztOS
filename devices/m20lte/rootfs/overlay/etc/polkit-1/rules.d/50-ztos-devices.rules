@@ -3,7 +3,7 @@
 // these units, only from the active session on the phone itself (not over
 // SSH), and only members of wheel. The S9's list, less the S9's hardware.
 var ztosUnits = [
-	"ztoscoresensorframework.service", "NetworkManager.service",
+	"ztoscoru.service", "NetworkManager.service",
 	"ztos-pstore-keep.service", "zboot-usb-gadget.service",
 	"ztos-update-check.timer", "sshd.service"
 ];
