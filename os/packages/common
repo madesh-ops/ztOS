@@ -48,6 +48,8 @@ gst-plugin-pipewire
 
 # to build ztMETRO and its apps inside the image (and for developers after)
 base-devel
+# zrn-passcoded links libcryptsetup (today it comes only as systemd's dependency)
+cryptsetup
 wayland-protocols
 git
 
