@@ -245,13 +245,22 @@ cfg --set-str ANDROID_BINDER_DEVICES ""
 # 32-bit ARM. No 32-bit vDSO: that needs a second, 32-bit cross compiler.
 cfg --enable COMPAT
 cfg --disable COMPAT_VDSO
-if [ -n "$WDT" ]; then
-	cfg --enable WATCHDOG
-	cfg --enable WATCHDOG_SYSFS
-	cfg --enable S3C2410_WATCHDOG
-else
-	cfg --disable S3C2410_WATCHDOG
-fi
+# Hangs become panics, so ramoops keeps a dmesg record of them (a panic
+# resets warm and the record survives; holding Power for a cold reset leaves
+# only a decayed console record). The soft lockup detector catches a CPU
+# stuck in the kernel with interrupts on, the buddy hard lockup detector one
+# stuck with them off (each CPU checks the next one's timer: the perf
+# variant needs pseudo-NMI, which the GIC-400 cannot give), the hung task
+# detector a task stuck in D state while the CPUs still run. The thresholds
+# and the panics are on the command line below. The watchdog driver is
+# always built: the DT node stays disabled (and nothing arms the WDT) unless
+# --watchdog, which then resets the SoC when nothing runs at all.
+for sym in SOFTLOCKUP_DETECTOR BOOTPARAM_SOFTLOCKUP_PANIC HARDLOCKUP_DETECTOR \
+	HARDLOCKUP_DETECTOR_PREFER_BUDDY BOOTPARAM_HARDLOCKUP_PANIC DETECT_HUNG_TASK \
+	WATCHDOG WATCHDOG_SYSFS S3C2410_WATCHDOG; do
+	cfg --enable "$sym"
+done
+cfg --set-val DEFAULT_HUNG_TASK_TIMEOUT 30
 cfg --set-str EXTRA_FIRMWARE ""
 cfg --set-str INITRAMFS_SOURCE "$LIST"
 # CMA: the video codec's frames (a 1080p decode takes ~60 MB, its firmware
@@ -266,6 +275,10 @@ cfg --set-str LOCALVERSION "-zboot"
 # audio PLL and ABOX's clocks, kernel/patches/exynos7885-dispaud-clk.patch),
 # which sound needs; the display keeps running on the same CMU.
 CMDLINE="console=tty0 loglevel=7 panic=5 keep_bootcon clk_ignore_unused pd_ignore_unused maxcpus=8 exynos7885.dispaud=1"
+# Lockups panic: hard lockup after 5 s, soft after 10 s (2 x watchdog_thresh),
+# a task in D state after 30 s, with every CPU's backtrace in the record.
+CMDLINE="$CMDLINE watchdog_thresh=5 softlockup_panic=1 hardlockup_panic=1 hung_task_panic=1"
+CMDLINE="$CMDLINE softlockup_all_cpu_backtrace=1 hardlockup_all_cpu_backtrace=1"
 [ -n "$SERIAL" ] && CMDLINE="console=ttySAC2,115200 $CMDLINE"
 [ -n "$WDT" ] && CMDLINE="$CMDLINE s3c2410_wdt.tmr_atboot=1 s3c2410_wdt.tmr_margin=60"
 CMDLINE="$CMDLINE${EXTRA:+ $EXTRA}"
@@ -277,7 +290,8 @@ for sym in ARCH_EXYNOS MMC_DW_EXYNOS DRM_SIMPLEDRM DRM_PANFROST TOUCHSCREEN_HIMA
 	I2C_EXYNOS5 EXYNOS_USI USB_DWC3_EXYNOS PHY_EXYNOS5_USBDRD USB_CONFIGFS_NCM \
 	SYSCON_REBOOT_MODE PSTORE_RAM IIO_ST_LSM6DSX_I2C SND_SOC EXYNOS_IOMMU \
 	ANDROID_BINDERFS BRIDGE NF_TABLES NFT_MASQ IP_MULTIPLE_TABLES NETFILTER_XT_MATCH_OWNER \
-	IP_NF_IPTABLES_LEGACY COMPAT; do
+	IP_NF_IPTABLES_LEGACY COMPAT SOFTLOCKUP_DETECTOR HARDLOCKUP_DETECTOR \
+	HARDLOCKUP_DETECTOR_BUDDY DETECT_HUNG_TASK S3C2410_WATCHDOG; do
 	grep -q "^CONFIG_$sym=y" out/.config || echo "WARNING: CONFIG_$sym is not =y"
 done
 
