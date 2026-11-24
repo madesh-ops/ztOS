@@ -13700,7 +13700,11 @@ static void ctl_command(struct zt_server *server, char *line) {
 		struct zt_toplevel *t;
 		wl_list_for_each(t, &server->toplevels, link) {
 			const char *id = t->xdg_toplevel->app_id;
-			if (t->mapped && !t->android_closed && id && !strcmp(id, line + 6)) {
+			if (t->mapped && id && !strcmp(id, line + 6)) {
+				/* The launcher asks only once it has started the app in
+				 * Android, and Waydroid may draw it again in the window
+				 * the shell had closed: that window is live again. */
+				t->android_closed = false;
 				if (!server->locked) {
 					if (t != server->shown) show_toplevel(server, t);
 					if (waydroid_window(id)) waydroid_visible(id);
