@@ -184,7 +184,18 @@ case $1 in
         timeout 10 lxc-attach "${lxc_args[@]}" --clear-env -v PATH=/system/bin:/system/xbin:/vendor/bin -- \
             /system/bin/cmd activity force-stop "$2"
         if $frozen; then
-            sleep 0.5
+            # Freeze again only once Android has dropped the app's task, and
+            # a moment more for Waydroid to take its window off the host: a
+            # fixed 0.5 s froze it mid-way, the window stayed on the shell
+            # until Android next ran (90 s), opening the app again brought
+            # the half-gone window back, and closing it again left Android
+            # with a task it could not remove (SystemUI crashing in a loop).
+            for _ in {1..20}; do
+                timeout 3 lxc-attach "${lxc_args[@]}" --clear-env -v PATH=/system/bin:/system/xbin:/vendor/bin -- \
+                    /system/bin/cmd activity stack list 2>/dev/null | grep -qF ": $2/" || break
+                sleep 0.15
+            done
+            sleep 1
             timeout 5 lxc-freeze "${lxc_args[@]}"
         fi
         ;;

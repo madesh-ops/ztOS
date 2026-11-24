@@ -366,6 +366,9 @@ struct zt_toplevel {
 	struct wlr_xdg_toplevel *xdg_toplevel;
 	bool mapped;
     bool background_hidden;
+	bool android_closed;	/* quit in Android by the shell: Waydroid only takes the
+				 * window away the next time Android composes (minutes,
+				 * with Android frozen), so it is never shown again */
 	bool introduced;	/* it has been in front before */
 	bool android_runtime;	/* resize Android layouts above the keyboard */
 	bool waydroid_ime;	/* Android IME visibility drives the host keyboard */
@@ -7011,6 +7014,7 @@ static bool waydroid_close(struct zt_toplevel *toplevel) {
 	}
 	run_detached("sh", "-c", "exec sudo -n /usr/local/libexec/ztos-waydroid-recover close \"$0\"", app_id + 9);
 	waydroid_closed_ms = now_ms() | 1;	/* what Android reveals next stays behind */
+	toplevel->android_closed = true;
 	return true;
 }
 
@@ -9050,7 +9054,8 @@ static void launch(struct zt_server *server, const char *command) {
 	}
     struct zt_toplevel *existing;
     wl_list_for_each(existing, &server->toplevels, link) {
-        if (existing->mapped && !existing->waydroid_boot && existing->launch_command[0] &&
+        if (existing->mapped && !existing->waydroid_boot && !existing->android_closed &&
+                existing->launch_command[0] &&
                 strcmp(existing->launch_command, command) == 0) {
             server->launch_ms = now_ms();
             show_toplevel(server, existing);
@@ -9079,7 +9084,7 @@ static void launch(struct zt_server *server, const char *command) {
 	if (*started > 0) {
 		struct zt_toplevel *t;
 		wl_list_for_each(t, &server->toplevels, link) {
-			if (t->mapped && toplevel_pid(t) == *started) {
+			if (t->mapped && !t->android_closed && toplevel_pid(t) == *started) {
 				server->launch_ms = now_ms();
 				show_toplevel(server, t);
 				return;
@@ -9206,7 +9211,7 @@ static int launch_timed_out(void *data) {
 static void show_next_app(struct zt_server *server) {
 	struct zt_toplevel *t;
 	wl_list_for_each_reverse(t, &server->toplevels, link) {
-		if (t->mapped && !t->background_hidden && t != server->shown) {
+		if (t->mapped && !t->background_hidden && !t->android_closed && t != server->shown) {
 			show_toplevel(server, t);
 			return;
 		}
@@ -9247,7 +9252,7 @@ static void switcher_open(struct zt_server *server) {
 	server->n_cards = 0;
 	struct zt_toplevel *t;
 	wl_list_for_each(t, &server->toplevels, link) {
-		if (t->mapped && !t->background_hidden && server->n_cards < MAX_CARDS) {
+		if (t->mapped && !t->background_hidden && !t->android_closed && server->n_cards < MAX_CARDS) {
 			server->cards[server->n_cards++] = t;
 		}
 	}
@@ -10195,6 +10200,7 @@ static int key_repeat_fired(void *data) {
 
 static void xdg_toplevel_map(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, map);
+	toplevel->android_closed = false;	/* mapped again: a new window */
 	char proc[64], executable[512];
 	snprintf(proc, sizeof(proc), "/proc/%d/exe", toplevel_pid(toplevel));
 	ssize_t length = readlink(proc, executable, sizeof(executable) - 1);
@@ -13282,7 +13288,12 @@ static void touch_end(struct zt_server *server, int32_t id, uint32_t time, bool 
                     hap(server, HAP_CLICK, HG_NAV);
                     break;
                 } else if (waydroid_close(gone)) {
-					/* (stopped in Android: its window goes with it) */
+					/* stopped in Android; its window is gone from the shell
+					 * now, not when Waydroid lets it go */
+					if (server->shown == gone) show_toplevel(server, NULL);
+					switcher_forget(server, gone);
+					hap(server, HAP_CLICK, HG_NAV);
+					break;
 				} else {
 					wlr_xdg_toplevel_send_close(gone->xdg_toplevel);
 					if (pid > 1 && pid != getpid()) {
@@ -13689,7 +13700,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 		struct zt_toplevel *t;
 		wl_list_for_each(t, &server->toplevels, link) {
 			const char *id = t->xdg_toplevel->app_id;
-			if (t->mapped && id && !strcmp(id, line + 6)) {
+			if (t->mapped && !t->android_closed && id && !strcmp(id, line + 6)) {
 				if (!server->locked) {
 					if (t != server->shown) show_toplevel(server, t);
 					if (waydroid_window(id)) waydroid_visible(id);
