@@ -426,7 +426,9 @@ struct zt_toplevel {
 	uint32_t size_serial;	/* the configure that turned it */
 	bool rot_pending;	/* turned and not yet drawn at the new size: shown fitted (app_draw_fit) */
 	uint32_t rot_sent_ms;	/* when that configure went */
-	struct wl_listener map, unmap, commit, destroy;
+	bool full_wanted;	/* it asked for the whole screen (a video: see "full screen") */
+	bool sent_full;		/* it was last told it has it */
+	struct wl_listener map, unmap, commit, destroy, request_fullscreen;
 };
 
 struct zt_popup {
@@ -625,6 +627,12 @@ struct zt_server {
 	int orient;		/* 0, 90 or 270: what the layout is laid out for (stage 0: always 0) */
 	int orient_sensor;	/* what ztoscsf-sensord last said, as an orient value; -1: nothing yet */
 	int orient_forced;	/* `orient N` on the control pipe; -1: auto (the sensor) */
+	/* An app's own full-screen button turns the screen (full_force, an orient
+	 * value; -1: none) until the phone is turned away from how the sensor had
+	 * it then (full_force_held; -1: its first reading after). See "full screen". */
+	int full_force, full_force_held;
+	struct zt_toplevel *full_force_app;
+	bool full_was;		/* app_full when the layout was last made */
 	bool frame_on;		/* the quads being drawn are in the view frame */
 	/* The action centre pulled down: what is behind it (Start or an app)
 	 * goes back by shade_scale about the screen's middle and dims by up to
@@ -1408,6 +1416,10 @@ static void rot_prep_arm(struct zt_server *server, uint32_t ms);
  * or was unlocked (or while it is covered): else the change turns */
 #define ROT_INSTANT_MS	700
 static int rot_target(struct zt_server *server);
+static void full_force_sensor(struct zt_server *server);
+static void full_force_end(struct zt_server *server, const char *why);
+static void full_step(struct zt_server *server);
+static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *data);
 
 static int orient_from_daemon(int edge_up, int current) {
 	switch (edge_up) {
@@ -1450,6 +1462,8 @@ static const struct {
 	{ "ztcontacts", true },
 	{ "ztmessages", true },
 	{ "superscan", true },		/* the browser */
+	/* SDK apps ("ztos." + their id) laid out for both */
+	{ "ztos.com.zerone.tube", true },	/* its video the whole screen on its side (see "full screen") */
 	/* upright only */
 	{ "ztphone", false },
 	{ "ztcamera", false },
@@ -1516,7 +1530,18 @@ static __attribute__((unused)) int view_ph(struct zt_server *server) {
 	struct wlr_output *o = server->output->wlr_output;
 	return server->orient % 180 ? o->width : o->height;
 }
-/* where the bars are, in the view */
+/* Full screen: an app that asked for the whole screen (xdg-shell
+ * set_fullscreen: Qt's showFullScreen, a video's button) has it while the
+ * screen is turned: no status bar, no nav bar, the apps' area the whole view,
+ * and the bars' edges of the glass its own. Upright it has them back, so an
+ * app that never lets go is left by turning the phone. */
+static bool app_full(struct zt_server *server) {
+	struct zt_toplevel *t = server->shown;
+	return server->orient != 0 && t && t->full_wanted && t->mapped && !server->locked &&
+		!server->switcher && app_turns(t);
+}
+
+/* where the bars are, in the view (none for an app with the whole screen) */
 static int inset_top(struct zt_server *server) {
 	return server->orient == 0 ? STATUS_H : 0;
 }
@@ -1524,10 +1549,10 @@ static int inset_bottom(struct zt_server *server) {
 	return server->orient == 0 ? NAV_H : 0;
 }
 static int inset_left(struct zt_server *server) {
-	return server->orient == 90 ? STATUS_H : server->orient == 270 ? NAV_H : 0;
+	return app_full(server) ? 0 : server->orient == 90 ? STATUS_H : server->orient == 270 ? NAV_H : 0;
 }
 static __attribute__((unused)) int inset_right(struct zt_server *server) {
-	return server->orient == 90 ? NAV_H : server->orient == 270 ? STATUS_H : 0;
+	return app_full(server) ? 0 : server->orient == 90 ? NAV_H : server->orient == 270 ? STATUS_H : 0;
 }
 /* the area between the bars, in the view: the apps' room */
 static int area_x(struct zt_server *server) {
@@ -4940,6 +4965,7 @@ static int m20_accel_changed(int fd, uint32_t mask, void *data) {
 		return 0;
 	}
 	server->orient_sensor = orient_from_daemon(edge, server->orient_sensor);
+	full_force_sensor(server);	/* (the phone turned since a full-screen press: it lets go) */
 	server->rot_instant = instant;
 	wlr_log(WLR_INFO, "orientation (accelerometer): edge %d up%s -> orient %d", edge,
 		instant ? ", instant" : "", server->orient_sensor);
@@ -5008,6 +5034,7 @@ static void rot_tell_sensor(struct zt_server *server) {
 	int want = server->rotation_enabled && !server->rotation_lock ? 1 : 0;
 	if (!want) {
 		server->orient_sensor = -1;
+		full_force_end(server, "rotation off or locked");	/* (not held over to when it is on again) */
 	}
 	if (want == server->rot_told || (server->rot_told < 0 && !want)) {
 		server->rot_told = want;
@@ -11615,6 +11642,14 @@ static void app_configure(struct zt_server *server, struct zt_toplevel *toplevel
 		}
 		toplevel->conf_orient = o;
 	}
+	/* (one in the background is told nothing: it has it again when it
+	 * comes back to a turned screen) */
+	bool full = toplevel == server->shown && app_full(server);
+	if (toplevel == server->shown && full != toplevel->sent_full &&
+			toplevel->xdg_toplevel->base->initialized) {
+		toplevel->sent_full = full;
+		wlr_xdg_toplevel_set_fullscreen(toplevel->xdg_toplevel, full);
+	}
 }
 
 /* How much smaller the app in front is shown, and how far right (its area's
@@ -14486,6 +14521,10 @@ static bool waydroid_full_ui_wait(struct zt_server *server, struct zt_toplevel *
 static void xdg_toplevel_unmap(struct wl_listener *listener, void *data) {
 	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, unmap);
 	struct zt_server *server = toplevel->server;
+	if (server->full_force_app == toplevel) {
+		full_force_end(server, "its app is gone");
+	}
+	toplevel->sent_full = false;	/* (mapped again, it starts afresh) */
 	if (call_front(server) == toplevel && server->shown == toplevel) {
 		/* the phone gone (its call over, its panels flipped out): what it
 		 * covered comes back as it was, the backdrop gone in the same frame */
@@ -14640,7 +14679,11 @@ static void xdg_toplevel_destroy(struct wl_listener *listener, void *data) {
 	wl_list_remove(&toplevel->unmap.link);
 	wl_list_remove(&toplevel->commit.link);
 	wl_list_remove(&toplevel->destroy.link);
+	wl_list_remove(&toplevel->request_fullscreen.link);
 	wl_list_remove(&toplevel->link);
+	if (server->full_force_app == toplevel) {
+		full_force_end(server, "its app is gone");
+	}
 	if (server->rot_wait == toplevel) {
 		rot_freeze_end(server, false);
 	}
@@ -14667,6 +14710,8 @@ static void server_new_xdg_toplevel(struct wl_listener *listener, void *data) {
 	wl_signal_add(&xdg_toplevel->base->surface->events.commit, &toplevel->commit);
 	toplevel->destroy.notify = xdg_toplevel_destroy;
 	wl_signal_add(&xdg_toplevel->events.destroy, &toplevel->destroy);
+	toplevel->request_fullscreen.notify = xdg_toplevel_request_fullscreen;
+	wl_signal_add(&xdg_toplevel->events.request_fullscreen, &toplevel->request_fullscreen);
 }
 
 static void xdg_popup_commit(struct wl_listener *listener, void *data) {
@@ -17707,7 +17752,8 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 		damage(server);
 		return;
 	}
-	if (!server->shade_open && py <= STATUS_H + 12) {
+	bool full = app_full(server);	/* (the whole screen: the bars' edges are the app's) */
+	if (!server->shade_open && py <= STATUS_H + 12 && !full) {
 		/* pulling it down, from the status bar on the glass: bring its
 		 * contents up to date once, now */
 		p->role = ROLE_SHADE;
@@ -17759,7 +17805,7 @@ static void touch_begin(struct zt_server *server, int32_t id, double px, double 
 		return;
 	}
 
-	if (py >= server->height - NAV_H) {
+	if (py >= server->height - NAV_H && !full) {
 		/* the nav bar: its buttons stay where they are on the glass */
 		p->role = ROLE_NAV;
 		p->index = (int)(px / (server->width / 3.0));
@@ -19429,6 +19475,7 @@ static void ctl_command(struct zt_server *server, char *line) {
 				server->rotation_enabled ? "on" : "off", server->rotation_lock ? "on" : "off");
 		} else {
 			server->orient_sensor = orient_from_daemon(id, server->orient_sensor);
+			full_force_sensor(server);
 			server->rot_instant = instant;
 			wlr_log(WLR_INFO, "orientation: edge %d up%s -> orient %d", id, instant ? ", instant" : "",
 				server->orient_sensor);
@@ -21644,6 +21691,9 @@ static int rot_target_urgent(struct zt_server *server, bool *urgent) {
 	*urgent = false;
 	if (server->orient_forced >= 0) {
 		want = server->orient_forced;
+	} else if (server->full_force >= 0 && server->full_force_app == server->shown &&
+			server->rotation_enabled && !server->rotation_lock) {
+		want = server->full_force;	/* the app's full-screen button (see "full screen") */
 	} else if (server->rotation_enabled && !server->rotation_lock && server->orient_sensor >= 0) {
 		want = server->orient_sensor;
 	}
@@ -21762,6 +21812,50 @@ static int rot_recheck_fired(void *data) {
 
 /* Start, the list, the keyboard and what was drawn at the old width, laid
  * out for `orient` (once, as the turn begins: the cairo of the turn). */
+/* The apps' area changed (turned, or an app took or gave back the whole
+ * screen): the app in front asked for its new size, and what was baked at
+ * the old width made again */
+static void area_relayout(struct zt_server *server) {
+	if (server->shown) {
+		app_configure(server, server->shown);	/* asked for its new size (rot_pending) */
+	}
+	/* what was baked at the old width */
+	osk_layout(server);
+	if (server->osk_visible) {
+		draw_osk(server);
+		osk_lift(server);
+	}
+	if (server->hyper) {
+		draw_hyper(server);
+	}
+	if (server->dialog_open || server->dialog_y > 1.0f - (float)server->dialog_h) {
+		draw_dialog(server);
+	}
+	if (server->volume_y > 1.0f - (float)banner_h(server)) {
+		draw_volume(server);
+	}
+	if (server->toast_y > 0.02f) {
+		draw_toast(server);
+	}
+	if (server->searching) {
+		draw_search(server);
+	}
+	if (server->menu_open) {
+		menu_draw(server);
+	}
+	if (server->compiling_text.tex && gl_begin(server)) {
+		glDeleteTextures(1, &server->compiling_text.tex);	/* made again when it is wanted */
+		server->compiling_text.tex = 0;
+		server->compiling_text.alloc_tw = server->compiling_text.alloc_th = 0;
+		gl_end(server);
+	}
+	/* (the switcher's titles are made each time it opens; it is upright here) */
+	server->notes_dirty = true;	/* the action centre is laid out anew when it is next pulled */
+	draw_status(server);	/* and the clock as two lines, for the turned bar */
+	server->moving = true;	/* the list's rows near the screen, over the next frames */
+	server->full_was = app_full(server);	/* (full_step: nothing more to do) */
+}
+
 static void rot_relayout(struct zt_server *server) {
 	bool was_land = server->rot_from % 180 != 0, land = start_land(server);
 	/* Start: where it was scrolled to, as near as a block goes */
@@ -21815,43 +21909,87 @@ static void rot_relayout(struct zt_server *server) {
 		anim_stop(server, &server->cf_stage_t);
 		server->cf_stage_t = server->rot_phase == ROT_IDLE ? 1.0f : 0.0f;
 	}
-	if (server->shown) {
-		app_configure(server, server->shown);	/* asked for its new size (rot_pending) */
+	area_relayout(server);
+}
+
+/* ---- full screen ----------------------------------------------------------
+ * An app has the whole screen while it asks for it and the screen is turned
+ * (app_full). Asked for while upright (a video's full-screen button), the
+ * screen turns on its side: the sensor's side if it says one, else 90; given
+ * back while turned, upright. Either holds (full_force) until the phone is
+ * turned away from how it was held at the press, then the sensor says again,
+ * as YouTube on Android. Only with the `rotation` switch on and ROTATION LOCK
+ * off (rot_target_urgent), and never for an upright-only app (app_turns). */
+
+static void full_force_end(struct zt_server *server, const char *why) {
+	if (server->full_force >= 0) {
+		wlr_log(WLR_INFO, "full screen: the turn to %d let go (%s)", server->full_force, why);
 	}
-	/* what was baked at the old width */
-	osk_layout(server);
-	if (server->osk_visible) {
-		draw_osk(server);
-		osk_lift(server);
+	server->full_force = -1;
+	server->full_force_app = NULL;
+}
+
+/* A new reading from the sensor: the phone turned since the press lets go */
+static void full_force_sensor(struct zt_server *server) {
+	if (server->full_force < 0 || server->orient_sensor < 0) {
+		return;
 	}
-	if (server->hyper) {
-		draw_hyper(server);
+	if (server->full_force_held < 0) {
+		server->full_force_held = server->orient_sensor;	/* (none at the press: this is how it is held) */
+	} else if (server->orient_sensor != server->full_force_held) {
+		full_force_end(server, "the phone turned");
 	}
-	if (server->dialog_open || server->dialog_y > 1.0f - (float)server->dialog_h) {
-		draw_dialog(server);
+}
+
+/* At the start of a frame: the whole screen taken or given back by anything
+ * but a turn (the app asking while turned, the lock, the switcher, another
+ * app in front), and the layout made again for it */
+static void full_step(struct zt_server *server) {
+	if (server->full_force >= 0 && (server->full_force_app != server->shown || server->locked)) {
+		full_force_end(server, "its app is not in front");
 	}
-	if (server->volume_y > 1.0f - (float)banner_h(server)) {
-		draw_volume(server);
+	bool full = app_full(server);
+	if (full == server->full_was) {
+		return;
 	}
-	if (server->toast_y > 0.02f) {
-		draw_toast(server);
+	wlr_log(WLR_INFO, "full screen: %s %s", server->shown ? app_name(server->shown) : "-",
+		full ? "has the whole screen" : "has the bars back");
+	area_relayout(server);	/* (sets full_was) */
+	server->full_was = full;
+	damage(server);
+}
+
+/* An app asks for the whole screen, or gives it back */
+static void xdg_toplevel_request_fullscreen(struct wl_listener *listener, void *data) {
+	(void)data;
+	struct zt_toplevel *toplevel = wl_container_of(listener, toplevel, request_fullscreen);
+	struct zt_server *server = toplevel->server;
+	bool want = toplevel->xdg_toplevel->requested.fullscreen;
+	toplevel->full_wanted = want;
+	if (!toplevel->xdg_toplevel->base->initialized) {
+		return;	/* (asked before its first configure: the map sees to it) */
 	}
-	if (server->searching) {
-		draw_search(server);
+	wlr_log(WLR_INFO, "full screen: %s %s", app_name(toplevel), want ? "asked for" : "given back");
+	/* where the screen is going: a turn still waiting for a finger to lift
+	 * (the button's own) counts as made */
+	int at = server->full_force >= 0 && server->full_force_app == toplevel ? server->full_force : server->orient;
+	if (toplevel == server->shown && toplevel->mapped && !server->locked && server->orient_forced < 0 &&
+			server->rotation_enabled && !server->rotation_lock && app_turns(toplevel) &&
+			(want ? at == 0 : at != 0)) {
+		/* (each ask is a press of the button: asked again after the phone
+		 * was turned upright, it turns again) */
+		int side = server->orient_sensor == 90 || server->orient_sensor == 270 ? server->orient_sensor : 90;
+		server->full_force = want ? side : 0;
+		server->full_force_held = server->orient_sensor;
+		server->full_force_app = toplevel;
+		wlr_log(WLR_INFO, "full screen: turned to %d until the phone is turned (sensor %d)",
+			server->full_force, server->orient_sensor);
 	}
-	if (server->menu_open) {
-		menu_draw(server);
-	}
-	if (server->compiling_text.tex && gl_begin(server)) {
-		glDeleteTextures(1, &server->compiling_text.tex);	/* made again when it is wanted */
-		server->compiling_text.tex = 0;
-		server->compiling_text.alloc_tw = server->compiling_text.alloc_th = 0;
-		gl_end(server);
-	}
-	/* (the switcher's titles are made each time it opens; it is upright here) */
-	server->notes_dirty = true;	/* the action centre is laid out anew when it is next pulled */
-	draw_status(server);	/* and the clock as two lines, for the turned bar */
-	server->moving = true;	/* the list's rows near the screen, over the next frames */
+	full_step(server);	/* (asked while turned: it has it now) */
+	app_configure(server, toplevel);
+	/* (an answer every time, even when nothing changed) */
+	wlr_xdg_surface_schedule_configure(toplevel->xdg_toplevel->base);
+	damage(server);	/* (the next frame turns, if it is to) */
 }
 
 /* A finger on the app as the screen turns: the app is told to forget it
@@ -22891,6 +23029,7 @@ static void render_frame(struct zt_server *server, bool show) {
 	bool running = anims_step(server, now);
 	boot_logo_tick(server, now);
 	running = running || server->boot_logo_stage != 0;
+	full_step(server);	/* the whole screen taken or given back (see "full screen") */
 	rot_step(server);	/* the turn: on its way, finished, or due (see "the turn") */
 	lf_step(server);	/* a landscape launch flip: over, cross-faded, done */
 	if (start_land(server) && !server->shown && server->start_t < 0.001f && !server->cf_rail &&
@@ -23142,7 +23281,8 @@ static void render_frame(struct zt_server *server, bool show) {
 	/* (and what shows through a held bar is still drawn under it) */
 	bool under_held = server->bar_held_diffuse > 0.003f && (bar_turning || server->bar_mix > 0.003f);
 	/* frosted, they have Start and the list drawn under them too */
-	int under_bottom = server->sensorhub_fail_screen || diffuse > 0.0f || under_held ? output->height :
+	bool full = app_full(server);	/* the app has the whole screen: no bars */
+	int under_bottom = server->sensorhub_fail_screen || diffuse > 0.0f || under_held || full ? output->height :
 		output->height - (int)floorf(NAV_H * server->scale);
 	/* the lock screen nearly down: only the nav bar's strip, which covers
 	 * the rest, is left. An empty scissor (height below zero) was a GL
@@ -23665,13 +23805,13 @@ static void render_frame(struct zt_server *server, bool show) {
 	boot_logo_draw(server, now);
 	bool retro_home = (retro_home_shown(server) && !lock_shown) ||
 		(retro_on(server) && server->locked);	/* it has its own status column, as its lock has */
-	if (!retro_home) {
+	if (!retro_home && !full) {
 		if (server->status_clear) {
 			bar_back_mix(server, 0, scan.hit[0], frosted[0], diffuse, false);
 		}
 		status_bar_draw(server, bar_angle);	/* (its glyphs turned in place when turned) */
 	}
-	if (server->charging && server->plug_layer.tex && !retro_on(server)) {
+	if (server->charging && server->plug_layer.tex && !retro_on(server) && !full) {
 		float a = server->battery_full ? 1.0f : server->st_plug;
 		if (a > 0.5f) {
 			plug_draw(server, bar_angle);
@@ -23774,7 +23914,7 @@ static void render_frame(struct zt_server *server, bool show) {
 		layer_draw(server, &server->sensorhub_fail_layer, 0, 0, 1.0f);
 	}
 	/* the nav bar stays on top: the panel comes down behind it */
-	if (!server->sensorhub_fail_screen && !(retro_on(server) && server->locked)) {
+	if (!server->sensorhub_fail_screen && !(retro_on(server) && server->locked) && !full) {
 		if (server->nav_clear) {
 			bar_back_mix(server, 1, scan.hit[1], frosted[1], diffuse, false);
 		}
@@ -24730,6 +24870,7 @@ int main(int argc, char *argv[]) {
 	server.orient = 0;
 	server.orient_sensor = -1;
 	server.orient_forced = -1;
+	server.full_force = server.full_force_held = -1;
 	server.rot_told = -1;
 	server.rot_prep_fd = -1;
 	server.cf_drop_card = -1;
