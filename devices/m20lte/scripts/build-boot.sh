@@ -255,12 +255,15 @@ cfg --disable COMPAT_VDSO
 # and the panics are on the command line below. The watchdog driver is
 # always built: the DT node stays disabled (and nothing arms the WDT) unless
 # --watchdog, which then resets the SoC when nothing runs at all.
-for sym in SOFTLOCKUP_DETECTOR BOOTPARAM_SOFTLOCKUP_PANIC HARDLOCKUP_DETECTOR \
+for sym in SOFTLOCKUP_DETECTOR HARDLOCKUP_DETECTOR \
 	HARDLOCKUP_DETECTOR_PREFER_BUDDY BOOTPARAM_HARDLOCKUP_PANIC DETECT_HUNG_TASK \
 	WATCHDOG WATCHDOG_SYSFS S3C2410_WATCHDOG; do
 	cfg --enable "$sym"
 done
 cfg --set-val DEFAULT_HUNG_TASK_TIMEOUT 30
+# 7.1 made these two counts (panic after N lockups / hung tasks), not bools
+cfg --set-val BOOTPARAM_SOFTLOCKUP_PANIC 1
+cfg --set-val BOOTPARAM_HUNG_TASK_PANIC 1
 cfg --set-str EXTRA_FIRMWARE ""
 cfg --set-str INITRAMFS_SOURCE "$LIST"
 # CMA: the video codec's frames (a 1080p decode takes ~60 MB, its firmware

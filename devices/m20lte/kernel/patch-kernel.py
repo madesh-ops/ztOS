@@ -720,7 +720,9 @@ insert(CLKH, "CLK_MOUT_G3D_BUSD",
 """, after=False)
 
 CLK = "drivers/clk/samsung/clk-exynos7885.c"
-replace(CLK, "(CLK_DOUT_G3D_SWITCH + 1)",
+# (marked by CLKS_NR_G3D, added just below: the DISPAUD patch later moves
+# CLKS_NR_TOP on again, so its G3D value is gone when this runs a second time)
+replace(CLK, "CLKS_NR_G3D",
         "#define CLKS_NR_TOP\t\t\t(CLK_MOUT_SHARED1_PLL + 1)",
         "#define CLKS_NR_TOP\t\t\t(CLK_DOUT_G3D_SWITCH + 1)")
 insert(CLK, "CLKS_NR_G3D",
