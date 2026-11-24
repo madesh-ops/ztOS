@@ -4873,17 +4873,24 @@ static void *m20_accel_thread(void *data) {
 					m20_accel.matrix[i * 3 + 2] * raw[2];
 			}
 			/* the phone's axes: x to its right edge, y to its top, z out of
-			 * the screen; held still, the reading points away from the ground */
+			 * the screen. On the M20 the mount matrix leaves the reading
+			 * pointing at the ground in x and y: held upright the chip reads
+			 * -1 g on its x, which the matrix makes -1 g on the phone's y
+			 * (tried 2026-11-24: upright x=-13000 y=0, right edge up y=+13000).
+			 * Turned round here: the reading points away from the ground. */
+			v[0] = -v[0];
+			v[1] = -v[1];
 			float g = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 			float upright = sqrtf(v[0] * v[0] + v[1] * v[1]);
 			int now = held;
-			/* lying nearly flat, or upside down: as it was */
-			if (g > 0 && upright > 0.5f * g) {
-				/* tried on the M20: x reads positive with the right
-				 * side down, that is the left edge up (270) */
+			/* lying nearly flat, or upside down: as it was. A phone read
+			 * in the hand leans back about 40-55 degrees: 0.4 g of the
+			 * reading in the screen's plane still counts */
+			if (g > 0 && upright > 0.4f * g) {
+				/* the edge up: the right edge (x) up is 90, the left 270 */
 				float deg = atan2f(v[0], v[1]) * 180.0f / (float)M_PI;
-				now = fabsf(deg) < 30 ? 0 : deg > 60 && deg < 120 ? 270 :
-					deg < -60 && deg > -120 ? 90 : held;
+				now = fabsf(deg) < 30 ? 0 : deg > 60 && deg < 120 ? 90 :
+					deg < -60 && deg > -120 ? 270 : held;
 			}
 			if (now != held) {
 				held = now;
